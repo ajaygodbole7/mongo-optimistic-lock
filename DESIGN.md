@@ -262,6 +262,7 @@ known, and the driver exception as the cause. Classification for driver 5.13.0, 
 | `MongoWriteConcernException`, whatever its code (also 13) | transient | `true`: applied on the primary, not confirmed (E8, E19) |
 | `MongoSecurityException`, also as a cause | not mapped: the caller gets it as it is (E17) | – |
 | server code 13 (Unauthorized), except a write-concern error | `NotAuthorisedMongoException`, not transient (E18) | – |
+| `MongoWriteException` without an error label (a bad request: 14, 40, 2), except 121, 10334, 11000 | `IllegalArgumentException` (programming error), nothing applied (G16) | – |
 | `MongoOperationTimeoutException` (`timeoutMS`) | `OperationTimeoutException` | `true`: the driver can retry several times before the deadline, so an earlier attempt may have applied (E9, E12) |
 | `MongoTimeoutException`, `MongoSocketOpenException`, `MongoConnectionPoolClearedException`, label `NoWritesPerformed`, closed client (`IllegalStateException`, E13) | transient | `false`: never sent |
 | socket read/write errors and timeouts, `MongoSocketClosedException`, `MongoInterruptedException` | transient | `true` |

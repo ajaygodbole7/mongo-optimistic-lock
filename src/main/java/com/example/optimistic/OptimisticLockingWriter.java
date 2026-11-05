@@ -256,6 +256,9 @@ public final class OptimisticLockingWriter<K> {
 
     /** Rejects a change with an operator outside the allow-list, or with a path that starts with a system field. */
     private void rejectSystemFields(Bson changes) {
+        if (changes == null) {
+            throw new IllegalArgumentException("changes must not be null");
+        }
         BsonDocument rendered;
         try {
             rendered = changes.toBsonDocument(BsonDocument.class, collection.getCodecRegistry());

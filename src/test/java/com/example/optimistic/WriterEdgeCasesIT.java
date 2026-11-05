@@ -6,8 +6,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.optimistic.exception.DuplicateKeyException;
 import com.example.optimistic.exception.TransientDataAccessException;
+import com.example.optimistic.exception.VersionConflictException;
 import com.example.paymentorders.MongoTestSupport;
+import com.mongodb.MongoWriteException;
 import com.mongodb.client.MongoClient;
+import com.mongodb.client.MongoClients;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.model.Updates;
 import java.time.Duration;
@@ -15,17 +18,17 @@ import java.time.Instant;
 import java.time.InstantSource;
 import java.util.Date;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.bson.Document;
 import org.bson.conversions.Bson;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 /**
- * SPEC section 12.2, G12 to G15: edge cases of the generic writer's assumptions, on a collection with no validator.
- * The disabled tests describe the deferred classification of bad-request server errors (SPEC section 11).
+ * SPEC section 12.2, G12 to G17: edge cases and hostile calls of the generic writer, on a collection with no
+ * validator.
  */
 class WriterEdgeCasesIT {
 
@@ -145,39 +148,68 @@ class WriterEdgeCasesIT {
         assertThat(stored().getString("name")).isEqualTo("a");
     }
 
-    // --- Deferred (SPEC section 11): a bad-request server error must not be transient ---
-
-    private void assertNotTransient(Bson precondition, Bson changes) {
-        assertThatThrownBy(() -> writer.update("w", 1L, precondition, changes, "bob"))
-                .isNotInstanceOf(TransientDataAccessException.class);
+    /** The update fails with an IllegalArgumentException caused by the server's write error, and nothing changes. */
+    private void assertRejected(OptimisticLockingWriter<String> w, long expected, Bson precondition, Bson changes,
+                                int code) {
+        Document before = stored();
+        assertThatThrownBy(() -> w.update("w", expected, precondition, changes, "bob"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .cause().isInstanceOfSatisfying(MongoWriteException.class,
+                        e -> assertThat(e.getCode()).isEqualTo(code));
+        assertThat(stored()).isEqualTo(before);
     }
 
-    @Disabled("Deferred: server code 14 is reported as transient with outcomeUnknown = true")
     @Test
-    void incOnStringFieldIsNotTransient() {
-        writer.insert("w", new Document("name", "a"), "alice");
-        assertNotTransient(null, Updates.inc("name", 1));
-    }
-
-    @Disabled("Deferred: server code 40 is reported as transient with outcomeUnknown = true")
-    @Test
-    void conflictingPathsIsNotTransient() {
-        writer.insert("w", new Document("count", 1), "alice");
-        assertNotTransient(null, Updates.combine(Updates.set("count", 5), Updates.inc("count", 1)));
-    }
-
-    @Disabled("Deferred: server code 2 (bad filter) is reported as transient with outcomeUnknown = true")
-    @Test
-    void invalidPreconditionIsNotTransient() {
-        writer.insert("w", new Document("name", "a"), "alice");
-        assertNotTransient(new Document("$noSuchOperator", 1), Updates.set("name", "b"));
-    }
-
-    @Disabled("Deferred: server code 2 ($inc overflow) is reported as transient with outcomeUnknown = true")
-    @Test
-    void versionOverflowIsNotTransient() {
+    void g16_badRequestIsNotTransient() {
+        insertRaw(1L);
+        assertRejected(writer, 1L, null, Updates.inc("name", 1), 14);
+        assertRejected(writer, 1L, null, Updates.combine(Updates.set("count", 5), Updates.inc("count", 1)), 40);
+        assertRejected(writer, 1L, new Document("$noSuchOperator", 1), Updates.set("name", "b"), 2);
+        widgets.drop();
         insertRaw(Long.MAX_VALUE);
-        assertThatThrownBy(() -> writer.update("w", Long.MAX_VALUE, null, Updates.set("name", "b"), "bob"))
-                .isNotInstanceOf(TransientDataAccessException.class);
+        assertRejected(writer, Long.MAX_VALUE, null, Updates.set("name", "b"), 2);
+
+        // The same bad request after a dropped connection: the error now comes from the driver's retry.
+        widgets.drop();
+        insertRaw(1L);
+        String app = "edgeRetry";
+        try (MongoClient retrying = MongoClients.create(MongoTestSupport.connectionString("appName=" + app))) {
+            client.getDatabase("admin").runCommand(new Document("configureFailPoint", "failCommand")
+                    .append("mode", new Document("times", 1))
+                    .append("data", new Document("failCommands", List.of("update")).append("closeConnection", true)
+                            .append("appName", app)));
+            OptimisticLockingWriter<String> viaRetry = new OptimisticLockingWriter<>(
+                    MongoTestSupport.database(retrying).getCollection("edgeWidgets"), InstantSource.fixed(NOW));
+            assertRejected(viaRetry, 1L, null, Updates.inc("name", 1), 14);
+        } finally {
+            client.getDatabase("admin")
+                    .runCommand(new Document("configureFailPoint", "failCommand").append("mode", "off"));
+        }
+    }
+
+    @Test
+    void g17_hostileCalls() {
+        insertRaw(1L);
+        Document before = stored();
+        assertThatThrownBy(() -> writer.update("w", 1L, null, null, "bob"))
+                .isInstanceOf(IllegalArgumentException.class);
+        for (long expected : new long[] {0L, -1L}) {
+            assertThatThrownBy(() -> writer.update("w", expected, null, Updates.set("name", "b"), "bob"))
+                    .isInstanceOf(VersionConflictException.class);
+        }
+        RuntimeException boom = new RuntimeException("recompute failed");
+        assertThatThrownBy(() -> writer.updateWithRetry("w", null, _ -> {
+            throw boom;
+        }, "job", ONE_TRY)).isSameAs(boom);
+        AtomicInteger calls = new AtomicInteger();
+        assertThatThrownBy(() -> writer.updateWithRetry("w", null, _ -> {
+            calls.incrementAndGet();
+            return Updates.set(WhoColumns.CREATED_BY, "eve");
+        }, "job", RetryPolicy.defaults())).isInstanceOf(IllegalArgumentException.class);
+        assertThat(calls).hasValue(1);
+        assertThat(stored()).isEqualTo(before);
+
+        assertThatThrownBy(() -> new RetryPolicy(3, null, Duration.ZERO)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> new OptimisticLockingWriter<String>(null)).isInstanceOf(NullPointerException.class);
     }
 }

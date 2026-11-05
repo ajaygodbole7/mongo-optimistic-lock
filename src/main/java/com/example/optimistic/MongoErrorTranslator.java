@@ -96,12 +96,16 @@ final class MongoErrorTranslator {
      *   <li>A write-concern error means that the primary applied the write, whatever its code (also 13, E19). Thus,
      *       it comes before the code-13 case.</li>
      *   <li>Code 13 (Unauthorized) is {@link NotAuthorisedMongoException}: not transient.</li>
+     *   <li>Any other write error without an error label is a bad request (for example 14, {@code $inc} on a string;
+     *       40, conflicting paths; 2, a bad filter): {@link IllegalArgumentException}, nothing applied. The driver
+     *       never retries because of a write error. If it retried after an earlier error, a retry of a write that
+     *       had applied returns the same result, not a write error (the retryable-writes specification).</li>
      *   <li>A {@code timeoutMS} expiry is {@link OperationTimeoutException}, outcome unknown on a write: the driver
      *       can retry several times before the deadline, and an earlier attempt can have applied.</li>
      *   <li>All other failures are transient ({@link #transientFailure}).</li>
      * </ul>
      */
-    private static DataAccessException translateDriver(Object id, Kind kind, MongoException e) {
+    private static RuntimeException translateDriver(Object id, Kind kind, MongoException e) {
         return switch (e) {
             case MongoWriteException w when w.getCode() == DOCUMENT_VALIDATION_FAILURE ->
                     new SchemaValidationException(idUnlessInsert(id, kind), REJECTED_BY_VALIDATOR, e);
@@ -112,6 +116,8 @@ final class MongoErrorTranslator {
             case MongoWriteConcernException _ -> transientFailure(id, kind, e);
             case MongoServerException s when s.getCode() == UNAUTHORIZED ->
                     new NotAuthorisedMongoException(idUnlessInsert(id, kind), e); // a retry cannot help
+            case MongoWriteException w when w.getErrorLabels().isEmpty() -> new IllegalArgumentException(
+                    "The server rejected the write for document " + id + ": " + w.getError().getMessage(), e);
             case MongoOperationTimeoutException _ -> new OperationTimeoutException(id, kind != Kind.READ, e);
             default -> transientFailure(id, kind, e);
         };
@@ -135,7 +141,7 @@ final class MongoErrorTranslator {
      * <ul>
      *   <li>A write-concern error has the {@code RetryableWriteError} label, and so do network errors. Thus, both
      *       come before the label case.</li>
-     *   <li>A server rejection that gets here comes from the driver's retry (retryable writes are always on). The
+     *   <li>A command error that gets here comes from the driver's retry (retryable writes are always on). The
      *       driver reports only the error of the retry, unless it has {@code NoWritesPerformed}. Thus, the first
      *       attempt can have applied: {@link RetriedWriteException}, outcome unknown.</li>
      * </ul>

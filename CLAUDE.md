@@ -23,5 +23,6 @@ it. Java 25, Maven, native MongoDB Java driver (sync); no Spring, no ODM. Requir
 - Write the minimum code the task needs. No extra features or configuration.
 - Touch only what the task needs.
 - Prove each change with a test; run `mvn verify` before saying it's done.
+- Before a component is done, give each public parameter and each catch-all branch (`default ->`, `else`) one hostile-input test: null, blank, wrong type, extreme value, an error that matches no specific case.
 - Write docs ~80% ASD-STE100 (short active sentences); keep identifiers and requirement meaning exact.
 - Doc layout (README, ONBOARDING): one key idea per bullet; a claim and its reason stay in one bullet, two claims are two bullets. A section opens with at most one framing sentence, then bullets. Sequences are numbered lists. Dense tables become bulleted sections. At most two levels of nesting. Narrative (the README "Why") stays as short paragraphs.
