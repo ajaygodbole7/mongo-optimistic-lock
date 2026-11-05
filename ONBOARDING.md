@@ -300,6 +300,7 @@ The test IDs (T1, E3, S1, G1, ...) are the same as in the tables in SPEC.md (sec
 | Class | Checks |
 |---|---|
 | `OptimisticLockingWriterIT` | The generic writer alone, on a plain `widgets` collection with string ids (G1–G10) |
+| `WriterEdgeCasesIT` | Edge cases of the generic writer: bad input, version types, extreme dates (G12–G15) |
 | `RetryPolicyTest` | The retry wait limits (G11), unit test |
 | `OptimisticLockingIT` | Each operation and rule on one client: create, amend, conflicts, status rules, validator, who-columns, dates |
 | `ShutdownIT` | Graceful shutdown: calls in progress finish, later calls are refused, the client closes once (S1–S4) |

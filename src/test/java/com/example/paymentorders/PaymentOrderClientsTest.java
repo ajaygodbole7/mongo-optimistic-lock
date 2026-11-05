@@ -73,7 +73,7 @@ class PaymentOrderClientsTest {
                 .getConnectionPoolListeners()).hasAtLeastOneElementOfType(JMXConnectionPoolListener.class);
     }
 
-    /** No java.util.Date anywhere: a BSON date, also in a subdocument, decodes as a UTC Instant. */
+    /** A BSON date at the root or in a subdocument decodes as a UTC Instant (not inside an array: G14). */
     @Test
     void t16_bsonDatesDecodeAsInstant() {
         Instant at = Instant.parse("2026-11-02T08:00:00.123Z");

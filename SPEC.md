@@ -287,6 +287,8 @@ Kubernetes settings (termination grace period, preStop hooks) are out of scope. 
 
 HTTP status mapping (comes with the API), application-level retries for transient errors, Kubernetes manifests, metrics. The generic writer has no delete operation, no array operators by default, no `arrayFilters` and no transactions (PORTING.md tells you what to add).
 
+Deferred: a server write error that comes from a bad request (for example code 14, `$inc` on a string; code 40, conflicting paths; code 2, a bad filter or an `$inc` overflow) is now reported as transient with `outcomeUnknown = true`. It must become a non-transient error. The disabled tests in `WriterEdgeCasesIT` describe the target.
+
 Deferred: a client-supplied idempotency key for `create` (with a unique index). With this key, a repeated create can return the existing order. It does not insert a duplicate.
 
 ## 12. Generic writer
@@ -303,18 +305,20 @@ The safety rules serve both jobs: the writer owns six field names (`_id`, `_docu
 
 | Operation | Behaviour |
 |---|---|
-| `insert(K id, Document fields, String user)` | The caller supplies `_id`. Sets the version to `1L` and the four who-columns. Rejects system fields in `fields`. A duplicate `_id` (error 11000) throws `DuplicateKeyException`, not a transient exception. |
+| `insert(K id, Document fields, String user)` | The caller supplies `_id`, not null. Sets the version to `1L` and the four who-columns. Rejects system fields in `fields`, also as the first segment of a dotted key (`_createdBy.x`). A duplicate `_id` (error 11000) throws `DuplicateKeyException`, not a transient exception. |
 | `update(K id, long expectedVersion, Bson precondition, Bson changes, String user)` | One `updateOne` with the filter `{_id, version: expectedVersion}` plus `precondition`, and the changes plus the last-modified pair plus `$inc` of the version by `1L`. On a zero match, one read: missing → `DocumentNotFoundException`; version differs → `VersionConflictException`; otherwise → `PreconditionFailedException` (with the current document). Before it reports a failed precondition, one read with `{_id}` plus `precondition` makes sure that the document does not match it now; if it matches (a rollback or a race), the result is `VersionConflictException`. |
 | `updateWithRetry(K id, Bson precondition, Function<Document, Bson> recompute, String user, RetryPolicy policy)` | Section 2, with `precondition` instead of the status set. Each attempt reads with `{_id}` plus `precondition`. If that read finds nothing, a read by `_id` tells not found from precondition failed, before `recompute`. |
 | `read(K id)` | `ReadConcern.MAJORITY` from the primary. |
 
+- `user` must not be null or blank, in each operation: it becomes a who-column. A violation throws `IllegalArgumentException` before any database call.
+- A stored version must be an integral number. `readVersion` accepts a `long`, an `int` or a whole `double` (a value written by mongosh or a migration), and throws `IllegalStateException` for any other value (for example `1.5` or `"1"`).
 - `precondition` is an extra filter, or `null` for none. Use it for a status rule, a guard, or a shard key (on a sharded collection, put the shard key in it, so that each update goes to one shard). With `null`, a zero match at the expected version is reported as a conflict.
 - The field names are those of section 3: `_documentMeta.version` and the four who-columns.
 - The rules of sections 3 and 9 apply to the generic writer: pinned majority writes and primary reads, the operator allow-list, the error classification, no retry of a write on a transient failure. The error classification is in its own class, `MongoErrorTranslator`.
 - The generic exceptions are in `com.example.optimistic.exception`, and the domain exceptions in `com.example.paymentorders.exception`. The generic exceptions extend `DataAccessException`. `OptimisticWriteException` is sealed: its subclasses are exactly `DocumentNotFoundException`, `VersionConflictException`, `PreconditionFailedException` and `RetriesExhaustedException`, so a caller can switch over them exhaustively. `TransientDataAccessException` is sealed to `RetriedWriteException` and `OperationTimeoutException`. `DataAccessException` stays open, so that each domain can add its own exceptions (for example `ShuttingDownException`). The domain exceptions extend them: `OrderNotFoundException` extends `DocumentNotFoundException`, `InvalidStatusException` extends `PreconditionFailedException`, `OrderValidationException` extends `SchemaValidationException`.
 - `PaymentOptimisticWriter` is the payment-order facade, and the example for other collections: it makes the `ObjectId` ids, gives the status set as the precondition, and catches the three generic exceptions above to throw their domain subclasses, with the generic exception as the cause. The other exceptions pass through.
 
-### 12.2 Tests (`OptimisticLockingWriterIT`)
+### 12.2 Tests (`OptimisticLockingWriterIT`; G12–G15 in `WriterEdgeCasesIT`)
 
 These tests use a minimal collection (`widgets`), string ids and no validator, so that they check the generic writer alone.
 
@@ -331,3 +335,7 @@ These tests use a minimal collection (`widgets`), string ids and no validator, s
 | G9 | The update matches nothing because the precondition is false; before the diagnosis read, a different writer makes the precondition true again, at the same version | `VersionConflictException`, not `PreconditionFailedException` |
 | G10 | An update (9 MB) that makes the stored document (9 MB) larger than 16 MB | `SchemaValidationException`, not transient; the message says that the document is larger than the 16 MB limit; the cause is the server's `MongoWriteException` with code 10334; the document is unchanged |
 | G11 | `RetryPolicy` limits (unit test) | Defaults: the wait limits after attempts 1 to 7 are 5, 10, 20, 40, 80, 100, 100 ms; a large attempt number does not overflow; `maxAttempts < 1` and negative delays are rejected |
+| G12 | A null or blank `user` in `insert`, `update` or `updateWithRetry`; `insert` with a null id; `insert` with the keys `_documentMeta.version` or `_createdBy.x` | `IllegalArgumentException`; nothing written |
+| G13 | A stored version of `int` 1, `double` 1.0, `double` 1.5, or `"1"`; then an update at version 1 | `int` and whole `double`: version 2; `1.5` and `"1"`: `IllegalStateException`, document unchanged |
+| G14 | Clocks at 1969-07-20T20:17:40.123Z and 9999-12-31T23:59:59.999Z; a date in a subdocument and in an array | The dates read back exactly as `Instant`; a date inside an array reads back as `java.util.Date` (the known limit of the codec) |
+| G15 | An empty change; `_id` `int` 1 updated as `long` 1, then inserted as `double` 1.0; an update on a thread that is already interrupted | Empty change: version +1; the numeric ids are one document (`DuplicateKeyException`); interrupted: `TransientDataAccessException` with `outcomeUnknown = true`, nothing applied |

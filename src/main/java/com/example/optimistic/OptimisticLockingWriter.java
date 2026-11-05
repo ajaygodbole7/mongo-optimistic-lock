@@ -91,7 +91,8 @@ public final class OptimisticLockingWriter<K> {
      * {@code clock} supplies the who-column timestamps. Tests give a fixed one. Majority writes and primary reads
      * are pinned. The client and the URI cannot change them. Thus, an acknowledged write stays after a failover,
      * and the diagnosis read is current. Each document that the writer reads has its dates as {@link Instant}
-     * ({@link #withInstantDates}), whatever client built the collection.
+     * ({@link #withInstantDates}), whatever client built the collection. One exception: a date inside an array
+     * decodes as {@code java.util.Date}, because the driver's list decoding does not use this setting.
      */
     public OptimisticLockingWriter(MongoCollection<Document> collection, InstantSource clock) {
         this.collection = collection
@@ -106,12 +107,17 @@ public final class OptimisticLockingWriter<K> {
      * Inserts {@code fields} with the caller's {@code id}, version 1 and all four who-columns. The caller makes the
      * id before the insert. Thus, if the outcome is unknown, the caller can look up the document.
      *
-     * @throws IllegalArgumentException if {@code fields} contains a system field
+     * @throws IllegalArgumentException if {@code id} is null, {@code user} is null or blank, or {@code fields}
+     *         contains a system field (also as the first segment of a dotted key)
      * @throws DuplicateKeyException if a document with the id exists (error 11000)
      */
     public void insert(K id, Document fields, String user) {
+        if (id == null) {
+            throw new IllegalArgumentException("id must not be null");
+        }
+        requireUser(user);
         for (String key : fields.keySet()) {
-            if (SYSTEM_FIELDS.contains(key)) {
+            if (SYSTEM_FIELDS.contains(key.split("\\.", 2)[0])) {
                 throw new IllegalArgumentException("System field not allowed in insert: " + key);
             }
         }
@@ -134,6 +140,7 @@ public final class OptimisticLockingWriter<K> {
      * @throws DocumentNotFoundException, VersionConflictException, PreconditionFailedException if no document matches
      */
     public long update(K id, long expectedVersion, Bson precondition, Bson changes, String user) {
+        requireUser(user);
         if (tryUpdate(id, expectedVersion, precondition, changes, user)) {
             return expectedVersion + 1;
         }
@@ -168,6 +175,7 @@ public final class OptimisticLockingWriter<K> {
      */
     public long updateWithRetry(K id, Bson precondition, Function<Document, Bson> recompute, String user,
                                 RetryPolicy policy) {
+        requireUser(user);
         for (int attempt = 1; ; attempt++) {
             // A local read: a majority read lags the primary and causes conflicts on hot documents.
             Document current = call(id, Kind.READ, () -> collection.find(filter(id, precondition)).first());
@@ -235,6 +243,13 @@ public final class OptimisticLockingWriter<K> {
         return current == null ? new DocumentNotFoundException(id) : new PreconditionFailedException(id, current);
     }
 
+    /** The user becomes a who-column, so it must name someone. */
+    private static void requireUser(String user) {
+        if (user == null || user.isBlank()) {
+            throw new IllegalArgumentException("user must not be null or blank");
+        }
+    }
+
     private static Bson filter(Object id, Bson precondition) {
         return precondition == null ? eq("_id", id) : and(eq("_id", id), precondition);
     }
@@ -272,10 +287,10 @@ public final class OptimisticLockingWriter<K> {
     }
 
     /**
-     * {@code codecs}, but a {@code Document} decodes each BSON date as an {@link Instant} (UTC), never as
-     * {@code java.util.Date}. The caller's codecs still encode the values that it writes. But a {@code Document} that
-     * the writer reads uses the driver's default type map (except dates): the caller's own {@code Document} decoding
-     * settings do not apply to it.
+     * {@code codecs}, but a {@code Document} decodes each BSON date as an {@link Instant} (UTC). A date inside an
+     * array still decodes as {@code java.util.Date}. The caller's codecs still encode the values that it writes. But a
+     * {@code Document} that the writer reads uses the driver's default type map (except dates): the caller's own
+     * {@code Document} decoding settings do not apply to it.
      */
     public static CodecRegistry withInstantDates(CodecRegistry codecs) {
         return CodecRegistries.fromRegistries(
@@ -284,9 +299,16 @@ public final class OptimisticLockingWriter<K> {
                 codecs);
     }
 
-    /** Reads {@code _documentMeta.version}. If it is missing, it throws. It does not use a default value. */
+    /**
+     * Reads {@code _documentMeta.version}. If it is missing or not a whole number, it throws. It does not use a
+     * default value. An {@code int} or a whole {@code double} (from mongosh or a migration) is accepted.
+     */
     public static long readVersion(Document doc) {
         if (doc.get(DOCUMENT_META) instanceof Document meta && meta.get(VERSION_FIELD) instanceof Number version) {
+            if (version.doubleValue() != version.longValue()) {
+                throw new IllegalStateException("Document " + doc.get("_id") + " has a version that is not a whole "
+                        + "number: " + version);
+            }
             return version.longValue();
         }
         throw new IllegalStateException("Document " + doc.get("_id") + " has no _documentMeta.version");
