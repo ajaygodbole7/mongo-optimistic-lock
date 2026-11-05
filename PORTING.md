@@ -3,7 +3,7 @@
 This guide tells you how to use the generic `OptimisticLockingWriter` on a collection that is not `paymentOrders`.
 The writer does two jobs: optimistic locking and the who-columns, with the safety rules that keep both correct. The
 guide also tells you when the pattern does not fit. SPEC.md section 12 is the contract of the generic writer.
-`OptimisticLockingWriterIT` (G1–G10) and `WriterEdgeCasesIT` (G12–G15) check it on a plain collection with string ids and no validator.
+`OptimisticLockingWriterIT` (G1–G10) and `WriterEdgeCasesIT` (G12–G18) check it on a plain collection with string ids and no validator.
 
 ## 1. The pattern in six rules
 

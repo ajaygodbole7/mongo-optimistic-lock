@@ -26,7 +26,7 @@ who-columns. The who-columns record the last writer, not a history. The version 
 pod's clock and are for people.
 
 **Generic writer and facade.** The locking mechanism (`com.example.optimistic`) has no payment-order types. Thus, other
-collections can use it, and its tests (G1–G15) check it without the payment-order code. The facade
+collections can use it, and its tests (G1–G18) check it without the payment-order code. The facade
 `PaymentOptimisticWriter` adds only three items: it makes the `ObjectId`, it gives the status rule as the precondition
 filter, and it changes three generic exceptions to their domain subclasses (`OrderNotFoundException`,
 `InvalidStatusException`, `OrderValidationException`). The domain exceptions extend the generic ones. Thus, a caller can
@@ -262,6 +262,7 @@ known, and the driver exception as the cause. Classification for driver 5.13.0, 
 | `MongoSecurityException`, also as a cause | not mapped: the caller gets it as it is (E17) | – |
 | server code 13 (Unauthorized), except a write-concern error | `NotAuthorisedMongoException`, not transient (E18) | – |
 | `MongoWriteException` without an error label (a bad request: 14, 40, 2), except 121, 10334, 11000 | `IllegalArgumentException` (programming error), nothing applied (G16) | – |
+| a read error without an error label, code 2 or 9 (a bad filter) | `IllegalArgumentException` (programming error); other read errors stay transient (G18) | – |
 | `MongoOperationTimeoutException` (`timeoutMS`) | `OperationTimeoutException` | `true`: the driver can retry several times before the deadline, so an earlier attempt may have applied (E9, E12) |
 | `MongoTimeoutException`, `MongoSocketOpenException`, `MongoConnectionPoolClearedException`, label `NoWritesPerformed`, closed client (`IllegalStateException`, E13) | transient | `false`: never sent |
 | socket read/write errors and timeouts, `MongoSocketClosedException`, `MongoInterruptedException` | transient | `true` |

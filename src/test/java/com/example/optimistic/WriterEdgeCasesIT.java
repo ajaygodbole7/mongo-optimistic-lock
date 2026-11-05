@@ -8,6 +8,7 @@ import com.example.optimistic.exception.DuplicateKeyException;
 import com.example.optimistic.exception.TransientDataAccessException;
 import com.example.optimistic.exception.VersionConflictException;
 import com.example.paymentorders.MongoTestSupport;
+import com.mongodb.MongoServerException;
 import com.mongodb.MongoWriteException;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
@@ -27,7 +28,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * SPEC section 12.2, G12 to G17: edge cases and hostile calls of the generic writer, on a collection with no
+ * SPEC section 12.2, G12 to G18: edge cases and hostile calls of the generic writer, on a collection with no
  * validator.
  */
 class WriterEdgeCasesIT {
@@ -211,5 +212,40 @@ class WriterEdgeCasesIT {
 
         assertThatThrownBy(() -> new RetryPolicy(3, null, Duration.ZERO)).isInstanceOf(NullPointerException.class);
         assertThatThrownBy(() -> new OptimisticLockingWriter<String>(null)).isInstanceOf(NullPointerException.class);
+    }
+
+    @Test
+    void g18_badFilterOnTheReadIsNotTransient() {
+        insertRaw(1L);
+        Document before = stored();
+        AtomicInteger calls = new AtomicInteger();
+        assertThatThrownBy(() -> writer.updateWithRetry("w", new Document("$noSuchOperator", 1), _ -> {
+            calls.incrementAndGet();
+            return Updates.set("name", "b");
+        }, "job", RetryPolicy.defaults()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .cause().isInstanceOfSatisfying(MongoServerException.class, e -> assertThat(e.getCode()).isEqualTo(2));
+        assertThat(calls).hasValue(0);
+        assertThat(stored()).isEqualTo(before);
+
+        // A server error on a read that is not a bad request stays transient: here ShutdownInProgress (91) twice, so
+        // that the driver's one read retry also fails.
+        String app = "edgeRead";
+        try (MongoClient failing = MongoClients.create(MongoTestSupport.connectionString("appName=" + app))) {
+            client.getDatabase("admin").runCommand(new Document("configureFailPoint", "failCommand")
+                    .append("mode", new Document("times", 2))
+                    .append("data", new Document("failCommands", List.of("find")).append("errorCode", 91)
+                            .append("appName", app)));
+            OptimisticLockingWriter<String> viaFailing = new OptimisticLockingWriter<>(
+                    MongoTestSupport.database(failing).getCollection("edgeWidgets"), InstantSource.fixed(NOW));
+            assertThatThrownBy(() -> viaFailing.updateWithRetry("w", null, _ -> Updates.set("name", "b"), "job",
+                    RetryPolicy.defaults()))
+                    .isInstanceOfSatisfying(TransientDataAccessException.class,
+                            e -> assertThat(e.outcomeUnknown()).isFalse());
+        } finally {
+            client.getDatabase("admin")
+                    .runCommand(new Document("configureFailPoint", "failCommand").append("mode", "off"));
+        }
+        assertThat(stored()).isEqualTo(before);
     }
 }

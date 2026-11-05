@@ -28,6 +28,7 @@ import com.mongodb.MongoSocketWriteTimeoutException;
 import com.mongodb.MongoTimeoutException;
 import com.mongodb.MongoWriteConcernException;
 import com.mongodb.MongoWriteException;
+import java.util.Set;
 import java.util.function.Supplier;
 import org.bson.BsonMaximumSizeExceededException;
 import org.bson.codecs.configuration.CodecConfigurationException;
@@ -46,6 +47,8 @@ final class MongoErrorTranslator {
     private static final int DOCUMENT_VALIDATION_FAILURE = 121;
     private static final int BSON_OBJECT_TOO_LARGE = 10334; // the document after an update would exceed 16 MB
     private static final int UNAUTHORIZED = 13;
+    // A read error with one of these codes is a bad filter. A short allow-list: an unknown read error stays transient.
+    private static final Set<Integer> BAD_QUERY = Set.of(2, 9); // BadValue, FailedToParse
     // What the driver throws (IllegalStateException) for an operation on a closed MongoClient.
     private static final String CLOSED_CLIENT_MESSAGE = "state should be: open";
     // Driver 5.13 has no public constants for these labels.
@@ -100,6 +103,8 @@ final class MongoErrorTranslator {
      *       40, conflicting paths; 2, a bad filter): {@link IllegalArgumentException}, nothing applied. The driver
      *       never retries because of a write error. If it retried after an earlier error, a retry of a write that
      *       had applied returns the same result, not a write error (the retryable-writes specification).</li>
+     *   <li>A read error without an error label and with code 2 (BadValue) or 9 (FailedToParse) is a bad filter:
+     *       {@link IllegalArgumentException}. All other read errors stay transient (for example a stepdown).</li>
      *   <li>A {@code timeoutMS} expiry is {@link OperationTimeoutException}, outcome unknown on a write: the driver
      *       can retry several times before the deadline, and an earlier attempt can have applied.</li>
      *   <li>All other failures are transient ({@link #transientFailure}).</li>
@@ -118,6 +123,9 @@ final class MongoErrorTranslator {
                     new NotAuthorisedMongoException(idUnlessInsert(id, kind), e); // a retry cannot help
             case MongoWriteException w when w.getErrorLabels().isEmpty() -> new IllegalArgumentException(
                     "The server rejected the write for document " + id + ": " + w.getError().getMessage(), e);
+            case MongoServerException s when kind == Kind.READ && s.getErrorLabels().isEmpty()
+                    && BAD_QUERY.contains(s.getCode()) -> new IllegalArgumentException(
+                    "The server rejected the filter for document " + id + ": " + s.getMessage(), e);
             case MongoOperationTimeoutException _ -> new OperationTimeoutException(id, kind != Kind.READ, e);
             default -> transientFailure(id, kind, e);
         };
