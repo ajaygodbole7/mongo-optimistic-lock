@@ -27,9 +27,9 @@ The facts:
 
 - **Stack:** Java 25, Maven, and the official MongoDB Java driver (sync), version 5.13.0. No Spring, no ODM.
 - **One collection:** `paymentOrders`.
-- **Target:** many copies ("pods") of the service on AWS EKS, using MongoDB Atlas (server 9.0).
-- **Not run on the target.** Nothing has been tested on AWS EKS or Atlas yet.
-- **Tests:** a local MongoDB in Docker (Testcontainers on Colima). This is the only place where the code has run.
+- **Many writers:** the design assumes many copies ("pods") of the service that write the same documents.
+- **Tests:** a single-node MongoDB 9.0.4 replica set in Docker (Testcontainers on Colima). This is the only place
+  where the code has run.
 
 ## 2. Optimistic locking
 
@@ -131,7 +131,6 @@ src/main/java/com/example/optimistic/       the generic writer
   exception/                   DataAccessException and its subclasses
 src/main/java/com/example/paymentorders/    the payment-order service
   PaymentOptimisticWriter      facade over the generic writer: ObjectId, status, domain exceptions
-  PatchUpdates                 deep merge into $set/$unset for system jobs
   PaymentOrderService          create, amend, updateCreditorAddress, submit, cancel, get, updateWithRetry
   PaymentOrderChecks, PaymentOrderSchema    two validation layers, kept in step by ValidationSyncIT
   PaymentOrderClients, PaymentOrderRuntime  client settings; graceful shutdown
@@ -203,11 +202,6 @@ The classes, and when you change them:
 - It registers the JVM shutdown hook.
 - You use it to wire the service into an application.
 
-**`PatchUpdates`**
-
-- A helper for system jobs. See DEEP_MERGE.md.
-- It turns a nested map into targeted updates.
-- It checks the paths against an allow-list.
 - You use it to write a system job.
 
 **`NewPaymentOrder`** and **`PaymentOrderStatus`**
@@ -307,7 +301,7 @@ The test IDs (T1, E3, S1, G1, ...) are the same as in the tables in SPEC.md (sec
 | `ConcurrencyIT` | Races between simulated pods, one `MongoClient` each: exactly one winner (T8, T9, T13) and no lost updates (T10, T14) |
 | `ErrorMappingIT` | Driver failures become the correct exception. It uses MongoDB **fail points** |
 | `ValidationSyncIT` | The Java checks and the MongoDB validator require the same fields |
-| `PaymentOrderChecksTest`, `PatchUpdatesTest`, `PaymentOrderClientsTest` | Unit tests, no database |
+| `PaymentOrderChecksTest`, `PaymentOrderClientsTest` | Unit tests, no database |
 | `StressIT` | The load test (profile `stress` only) |
 | `AtlasSmokeIT` | A smoke test against a real cluster (profile `atlas` only). Not run yet |
 | `MongoTestSupport` | Shared helpers: the container, `newPod()`, `sampleOrder()`, `VIRTUAL_THREADS` |
@@ -419,10 +413,9 @@ Code review rejects changes that break these rules from CLAUDE.md and SPEC.md.
 3. **ERRORS.md:** each exception that a caller can get, and what to do.
 4. **DESIGN.md:** the reasons for pool settings, retries, validation layers, error classification and caller
    identity.
-5. **DEEP_MERGE.md:** the `PatchUpdates` helper for system jobs.
-6. **OPERATIONS.md:** configuration, monitoring, shutdown, the stress profile, and how to run against Atlas.
-7. **PORTING.md:** how to use the generic writer on a different collection, and when the pattern does not fit.
-8. **`OptimisticLockingWriter.java`:** the class that does all writes.
+5. **OPERATIONS.md:** configuration, monitoring, shutdown, the stress profile, and how to run against Atlas.
+6. **PORTING.md:** how to use the generic writer on a different collection, and when the pattern does not fit.
+7. **`OptimisticLockingWriter.java`:** the class that does all writes.
    - It has approximately 290 lines, and half of them are Javadoc.
    - Read all of it.
 

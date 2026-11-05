@@ -14,7 +14,6 @@ PaymentOrderRuntime                   one per pod: owns the MongoClient, gracefu
             └─ OptimisticLockingWriter   generic: locking + who-columns (WhoColumns; errors: MongoErrorTranslator)
                  └─ MongoClient       from PaymentOrderClients (pool, timeouts)
 PaymentOrderSchema                    the $jsonSchema validator (safety net); a deployment step, not the pods
-PatchUpdates                          deep-merge helper for system jobs (DEEP_MERGE.md)
 ```
 
 **Two jobs.** Every insert and update to the collection goes through one writer; that funnel is what makes both jobs
@@ -178,7 +177,7 @@ System read-modify-write uses
 - Both use one version-checked `updateOne`. The version protects the whole document. Thus, two writers that change
   different subtrees at the same version still have a conflict, and exactly one wins (T13).
 - A general deep merge is not part of `amend`. It is a small update language (dotted paths, null as delete, a path
-  allow-list), and it is not about locking. System jobs can use the `PatchUpdates` helper (DEEP_MERGE.md).
+  allow-list), and it is not about locking.
 
 **Validation has two layers:**
 1. **Service checks** (`PaymentOrderChecks`, hand-written, no framework) run before each write of `create`, `amend`

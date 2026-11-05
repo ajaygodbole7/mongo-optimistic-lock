@@ -28,7 +28,6 @@ import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.InstantSource;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -323,41 +322,6 @@ class OptimisticLockingIT {
         assertThat(version).isEqualTo(3L);
         assertThat(MongoTestSupport.amountOf(doc)).isEqualByComparingTo("1251.00");
         assertThat(doc.getString("_lastModifiedBy")).isEqualTo("system");
-    }
-
-    @Test
-    void t22_patchThroughWriterChangesOnlyGivenLeaves() {
-        PaymentOptimisticWriter writer = new PaymentOptimisticWriter(collection(client));
-        Set<String> allowed = Set.of("creditor.address", "remittance");
-        Set<PaymentOrderStatus> draft = Set.of(PaymentOrderStatus.DRAFT);
-        ObjectId id = service.create(sampleOrder(), "alice");
-        Document before = load(id);
-
-        Map<String, Object> address = new HashMap<>(Map.of("city", "Munich"));
-        address.put("street", null);
-        long v2 = writer.update(id, 1L, draft, PatchUpdates.toUpdate(
-                Map.of("creditor", Map.of("address", address)), allowed, PatchUpdates.NullMode.UNSET), "bob");
-
-        Document after = load(id);
-        assertThat(v2).isEqualTo(2L);
-        assertThat(after.getEmbedded(List.of("creditor", "address"), Document.class)).isEqualTo(new Document()
-                .append("city", "Munich").append("postCode", "10115").append("country", "DE"));
-        assertThat(after.getEmbedded(List.of("creditor", "name"), String.class)).isEqualTo("Acme Ltd");
-        assertThat(after.get("remittance")).isEqualTo(before.get("remittance"));
-
-        // Patches skip the service's checks, so here the MongoDB validator is the safety net: SET_NULL on a string
-        // leaf and UNSET of a required leaf fail as a whole, mapped to OrderValidationException with the 121 cause.
-        Map<String, Object> nullRef = new HashMap<>();
-        nullRef.put("reference", null);
-        Map<String, Object> noCountry = new HashMap<>();
-        noCountry.put("country", null);
-        assertThatThrownBy(() -> writer.update(id, v2, draft, PatchUpdates.toUpdate(
-                Map.of("remittance", nullRef), allowed, PatchUpdates.NullMode.SET_NULL), "bob"))
-                .isInstanceOfSatisfying(OrderValidationException.class, OptimisticLockingIT::assertRejectedByServer);
-        assertThatThrownBy(() -> writer.update(id, v2, draft, PatchUpdates.toUpdate(
-                Map.of("creditor", Map.of("address", noCountry)), allowed, PatchUpdates.NullMode.UNSET), "bob"))
-                .isInstanceOfSatisfying(OrderValidationException.class, OptimisticLockingIT::assertRejectedByServer);
-        assertThat(load(id)).isEqualTo(after);
     }
 
     @Test

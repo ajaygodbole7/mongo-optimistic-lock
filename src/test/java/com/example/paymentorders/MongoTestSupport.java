@@ -3,9 +3,8 @@ package com.example.paymentorders;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoDatabase;
+import com.mongodb.client.model.Updates;
 import java.math.BigDecimal;
-import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.Executor;
 import org.bson.Document;
 import org.bson.conversions.Bson;
@@ -110,8 +109,7 @@ public final class MongoTestSupport {
 
     /** The recompute function for system writes in tests: amount + 1, calculated from the current document. */
     static Bson incrementAmount(Document order) {
-        return PatchUpdates.toUpdate(Map.of("amount", amountOf(order).add(BigDecimal.ONE)),
-                Set.of("amount"), PatchUpdates.NullMode.REJECT);
+        return Updates.set("amount", new Decimal128(amountOf(order).add(BigDecimal.ONE)));
     }
 
     static BigDecimal amountOf(Document order) {

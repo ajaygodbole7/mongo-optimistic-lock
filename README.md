@@ -222,7 +222,6 @@ Callers get typed exceptions, not raw driver exceptions. ERRORS.md lists each on
 | [OPERATIONS.md](OPERATIONS.md) | Configure, monitor, shut down and load-test |
 | [DESIGN.md](DESIGN.md) | Understand the reasons for each decision |
 | [SPEC.md](SPEC.md) | Find the requirements and the test IDs. SPEC.md is the contract |
-| [DEEP_MERGE.md](DEEP_MERGE.md) | See how the package-private `PatchUpdates` helper builds nested changes for system jobs |
 
 ## Contributing
 
