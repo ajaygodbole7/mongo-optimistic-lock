@@ -184,8 +184,8 @@ A transient failure is one of two exceptions. Both extend the sealed `TransientD
 
 | Kind | Example | Exception |
 |---|---|---|
-| Never sent | Server selection timeout, pool checkout timeout (without `timeoutMS`), pool cleared, socket open failure, operation on a closed client, interrupt during the wait in `updateWithRetry` | `NotSentException` (a `NotWrittenException`): the write did not happen |
-| Sent, response lost | Connection dropped after sending, socket read or write failure, socket read timeout, interrupted thread | `ResponseLostException` (a `MaybeWrittenException`): the write may have happened |
+| Never sent | Server selection timeout, pool checkout timeout (without `timeoutMS`), pool cleared, socket open failure (`MongoSocketOpenException`; a DNS failure is a plain `MongoSocketException` and stays the general type), operation on a closed client, interrupt during the wait in `updateWithRetry` | `NotSentException` (a `NotWrittenException`): the write did not happen |
+| Sent, response lost | Connection dropped after sending, socket read or write failure, socket read timeout, interrupted thread (the driver throws the same exception for an interrupt before the send) | `ResponseLostException` (a `MaybeWrittenException`): the write may have happened |
 | `timeoutMS` expired on a write | Any expiry of the operation deadline, also in server selection or pool checkout | `WriteTimeoutException` (a `MaybeWrittenException`): the driver can retry several times before the deadline, so an earlier attempt may have applied |
 | Applied, not confirmed | Write-concern error | `WriteNotConfirmedException` (a `MaybeWrittenException`): the primary applied it |
 | Rejected by the server after the driver's retry | NotWritablePrimary, NodeIsRecovering, other `RetryableWriteError` | `RetriedWriteException` (a `MaybeWrittenException`): the driver reports only the retry's error, so the first attempt may have applied |

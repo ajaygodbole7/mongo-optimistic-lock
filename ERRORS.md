@@ -26,7 +26,7 @@ This document lists each exception that a caller of the writer or the payment-or
 | `WriteTimeoutException` (a `MaybeWrittenException`) | The `timeoutMS` deadline expired on a write | Reload first. For an API, 504 |
 | `RetriedWriteException` (a `MaybeWrittenException`) | The driver retried, and the server rejected the retry. The first attempt may have applied | Reload first |
 | `WriteNotConfirmedException` (a `MaybeWrittenException`) | The primary applied the write, but a majority did not confirm it (write-concern error) | Reload first, with `ReadConcern.MAJORITY` |
-| `ResponseLostException` (a `MaybeWrittenException`) | The request may have reached the server, but the response did not arrive (connection dropped, socket failure, interrupted thread) | Reload first |
+| `ResponseLostException` (a `MaybeWrittenException`) | The request may have reached the server, but the response did not arrive (connection dropped, socket failure, interrupted thread: an interrupt can also come before the send, but the driver does not say which) | Reload first |
 | `ServerOverloadedException` (a `MaybeWrittenException`) | The server shed load, and the driver's own retries failed | Reload first. Retry later, not at once. For an API, 503 |
 | `RetriesExhaustedException` | `updateWithRetry` used all its attempts. It is not a `VersionConflictException` | Requeue the work |
 | `NotAuthorisedMongoException` | The database user has no permission (code 13) | Correct the roles. Do not retry |
