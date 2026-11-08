@@ -74,13 +74,13 @@ This code brings back the lost update that the version check prevents.
 
 ## Retry after an unknown outcome
 
-A write that fails with `outcomeUnknown = true` may have happened.
+A write that fails with `MaybeWrittenException` may have happened.
 
 - **Update:** a retry applies at most once.
   - If the first attempt applied, the version moved, and the retry gets a conflict.
   - That conflict can be your own write. Reload and compare before you decide.
 - **Insert:**
   - The payment-order service makes a new `_id` for each `create`, so a second `create` inserts a second order.
-  - If `create` fails with `outcomeUnknown = true`, look up the order by the exception's `id()` before you create
+  - If `create` fails with `MaybeWrittenException`, look up the order by the exception's `id()` before you create
     it again.
   - With the generic writer, the caller supplies the id, so a repeated insert gets `DuplicateKeyException`.

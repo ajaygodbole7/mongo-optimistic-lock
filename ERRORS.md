@@ -19,10 +19,15 @@ This document lists each exception that a caller of the writer or the payment-or
 | `SchemaValidationException`, `reason()` = `REJECTED_BY_VALIDATOR` | The database validator refused the document. The cause is the driver exception | Return 400. From a service call, report a bug: the checks and the schema disagree |
 | `SchemaValidationException`, `reason()` = `TOO_LARGE` | The document is over 16 MB. The cause is the driver exception | Return 413 |
 | `DuplicateKeyException` | The id exists (error 11000) | Look up the existing document |
-| `TransientDataAccessException`, `outcomeUnknown()` = `false` | An infrastructure failure. The write did not happen | Retry later |
-| `TransientDataAccessException`, `outcomeUnknown()` = `true` | An infrastructure failure. The write may have happened | Reload first, with `ReadConcern.MAJORITY`. If the version moved and the change is yours, the write worked |
-| `OperationTimeoutException` (a transient subclass) | The `timeoutMS` deadline expired. On a write, the outcome is always unknown | As for `outcomeUnknown()` = `true` |
-| `RetriedWriteException` (a transient subclass) | The driver retried, and the server rejected the retry. The outcome is always unknown | As for `outcomeUnknown()` = `true` |
+| `NotWrittenException` (a `TransientDataAccessException`) | An infrastructure failure. The write did not happen (also every failed read without a subtype) | Retry later |
+| `ReadTimeoutException` (a `NotWrittenException`) | The `timeoutMS` deadline expired on a read | Retry later. For an API, 504 |
+| `NotSentException` (a `NotWrittenException`) | The request was not sent: no server found, pool timeout or cleared, closed client, or an interrupt between two `updateWithRetry` attempts | Retry later |
+| `MaybeWrittenException` (a `TransientDataAccessException`) | An infrastructure failure with no known reason (logged at `WARN`). The write may have happened | Reload first, with `ReadConcern.MAJORITY`. If the version moved and the change is yours, the write worked |
+| `WriteTimeoutException` (a `MaybeWrittenException`) | The `timeoutMS` deadline expired on a write | Reload first. For an API, 504 |
+| `RetriedWriteException` (a `MaybeWrittenException`) | The driver retried, and the server rejected the retry. The first attempt may have applied | Reload first |
+| `WriteNotConfirmedException` (a `MaybeWrittenException`) | The primary applied the write, but a majority did not confirm it (write-concern error) | Reload first, with `ReadConcern.MAJORITY` |
+| `ResponseLostException` (a `MaybeWrittenException`) | The request may have reached the server, but the response did not arrive (connection dropped, socket failure, interrupted thread) | Reload first |
+| `ServerOverloadedException` (a `MaybeWrittenException`) | The server shed load, and the driver's own retries failed | Reload first. Retry later, not at once. For an API, 503 |
 | `RetriesExhaustedException` | `updateWithRetry` used all its attempts. It is not a `VersionConflictException` | Requeue the work |
 | `NotAuthorisedMongoException` | The database user has no permission (code 13) | Correct the roles. Do not retry |
 | `ShuttingDownException` | The pod is shutting down. It refused the call before it touched the database | Retry on another pod (for example, return 503) |

@@ -9,6 +9,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.example.optimistic.OptimisticLockingWriter;
 import com.example.optimistic.RetryPolicy;
 import com.example.optimistic.exception.RetriesExhaustedException;
+import com.example.optimistic.exception.MaybeWrittenException;
 import com.example.optimistic.exception.TransientDataAccessException;
 import com.example.optimistic.exception.VersionConflictException;
 import com.mongodb.client.MongoClient;
@@ -183,7 +184,7 @@ class StressIT {
                     if (!ALLOW_TRANSIENT) {
                         throw e;
                     }
-                    if (e.outcomeUnknown()) {
+                    if (e instanceof MaybeWrittenException) {
                         stats.systemUnknown[idx]++;
                     } else {
                         stats.transientNotApplied++;
@@ -219,7 +220,7 @@ class StressIT {
                     if (!ALLOW_TRANSIENT) {
                         throw e;
                     }
-                    if (e.outcomeUnknown()) {
+                    if (e instanceof MaybeWrittenException) {
                         stats.userUnknown[idx]++;
                     } else {
                         stats.transientNotApplied++;
@@ -255,7 +256,7 @@ class StressIT {
                 writes ok      : %d (%,.0f/s, measured window)  user %d, system %d
                 user conflicts : %d (%.1f%% of user attempts, whole run)
                 system retries : %d, exhausted %d (whole run)
-                transient      : %d not applied, %d outcome unknown; %d failed reloads
+                transient      : %d not written, %d maybe written; %d failed reloads
                 user latency   : p50 %.2f ms, p99 %.2f ms, max %.2f ms (one amend)
                 system latency : p50 %.2f ms, p99 %.2f ms, max %.2f ms (whole updateWithRetry, with waits)
                 %n""",
@@ -293,7 +294,7 @@ class StressIT {
             long systemUnknown = stats.stream().mapToLong(s -> s.systemUnknown[idx]).sum();
             Document doc = collection(client).find(eq("_id", orders.get(i))).first();
 
-            // Exact when nothing was "outcome unknown"; otherwise each unknown write may or may not have applied.
+            // Exact when nothing was "maybe written"; otherwise each such write may or may not have applied.
             assertThat(OptimisticLockingWriter.readVersion(doc) - 1).as("order %d version", i)
                     .isBetween(user + system, user + system + userUnknown + systemUnknown);
             // Both kinds of write add 1 to amount from the value that they read: a lost update loses an increment.

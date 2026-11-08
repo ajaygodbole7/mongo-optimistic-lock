@@ -22,7 +22,7 @@ connection string overrides the default below. The exception is `retryWrites`, w
 | `waitQueueTimeoutMS` | 5 s | Pool wait without `timeoutMS` (driver default 120 s). It does not turn off the default `timeoutMS`; with `timeoutMS`, the driver ignores this value and `timeoutMS` limits the wait. If the URI sets `waitQueueTimeoutMS` without `timeoutMS`, the factory logs a `WARN`: to fail faster on a full pool, set a smaller `timeoutMS` |
 | `maxIdleTimeMS` | 5 min | Reuse during bursts, prune afterwards |
 | `connectTimeoutMS` | 10 s | Fail fast on network trouble |
-| `retryWrites` | always `true` | The "outcome unknown" classification depends on it |
+| `retryWrites` | always `true` | `RetriedWriteException` depends on it |
 | `appName` | pod name (`HOSTNAME`), else `payment-orders` | Atlas, server logs and `currentOp` show which pod opened a connection. The URI can override it |
 | pool listener | `JMXConnectionPoolListener` | Pool size, checked-out connections and waiters are JMX MBeans (see Monitoring) |
 
@@ -53,7 +53,7 @@ acknowledged write stays after a failover, and the diagnosis read is always curr
 ## Monitoring
 
 With the default `timeoutMS`, a full connection pool and a slow primary give the same error
-(`OperationTimeoutException`). Thus, monitor the pool itself:
+(`WriteTimeoutException`). Thus, monitor the pool itself:
 
 - **JMX:** the factory registers the driver's `JMXConnectionPoolListener`. Each pool is an MBean
   (`org.mongodb.driver:type=ConnectionPool,...`) with its size, checked-out connections and waiters. Export it with
@@ -187,15 +187,15 @@ This test checks the transient-error mapping and the retryable writes of the dri
 
 2. While it runs, open the Atlas UI and select the **…** menu of the cluster → **Test Resilience** → **Test Primary
    Failover**. Atlas steps down the primary and elects a new one.
-3. When the run ends, it must pass. The report shows the number of transient writes (`not applied` /
-   `outcome unknown`). With transient failures, the no-lost-updates check becomes a range: successful writes
+3. When the run ends, it must pass. The report shows the number of transient writes (`not written` /
+   `maybe written`). With transient failures, the no-lost-updates check becomes a range: successful writes
    ≤ version − 1 ≤ successful + outcome-unknown writes. Latency increases for a short time during the election.
    For a planned stepdown, there are few or no transient failures, because with the default `timeoutMS` the driver
    continues to retry within 10 s.
 4. Also do an unplanned failure: in **Test Resilience**, use the node or region outage test, if your tier has it. When a
    primary fails without warning, the secondaries wait approximately 10 s before they start an election. That wait, plus
-   the election, is longer than the 10 s `timeoutMS`. Thus, the writes in that period end as `OperationTimeoutException`
-   with `outcome unknown`, and the callers must reload. This is a known decision: a longer `timeoutMS` also means a
+   the election, is longer than the 10 s `timeoutMS`. Thus, the writes in that period end as `WriteTimeoutException`,
+   and the callers must reload. This is a known decision: a longer `timeoutMS` also means a
    longer Kubernetes grace period.
 
 Notes for Atlas:

@@ -8,6 +8,7 @@ import com.example.optimistic.MongoErrorTranslator.Kind;
 import com.example.optimistic.exception.DataAccessException;
 import com.example.optimistic.exception.DocumentNotFoundException;
 import com.example.optimistic.exception.DuplicateKeyException;
+import com.example.optimistic.exception.NotSentException;
 import com.example.optimistic.exception.OptimisticWriteException;
 import com.example.optimistic.exception.PreconditionFailedException;
 import com.example.optimistic.exception.RetriesExhaustedException;
@@ -171,7 +172,8 @@ public final class OptimisticLockingWriter<K> {
      * @return the new version, or the current version if {@code recompute} returned {@code null}
      * @throws DocumentNotFoundException, PreconditionFailedException before {@code recompute}
      * @throws RetriesExhaustedException when all {@code policy.maxAttempts()} attempts conflict; requeue the work
-     * @throws TransientDataAccessException on an infrastructure failure, or on an interrupt during the wait
+     * @throws TransientDataAccessException on an infrastructure failure; {@link NotSentException} on an interrupt
+     *         during the wait
      */
     public long updateWithRetry(K id, Bson precondition, Function<Document, Bson> recompute, String user,
                                 RetryPolicy policy) {
@@ -213,7 +215,7 @@ public final class OptimisticLockingWriter<K> {
             Thread.sleep(Duration.ofNanos(ThreadLocalRandom.current().nextLong(upperNanos + 1)));
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
-            throw new TransientDataAccessException(id, false, interrupted);
+            throw new NotSentException(id, interrupted); // the next attempt was not sent
         }
     }
 

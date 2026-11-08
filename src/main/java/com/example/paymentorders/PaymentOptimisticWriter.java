@@ -46,7 +46,7 @@ public final class PaymentOptimisticWriter {
 
     /**
      * Inserts {@code fields} (the business fields and the status) with a new {@code _id}, version 1 and all four
-     * who-columns. If the outcome is unknown, the {@code TransientDataAccessException} contains the id. The caller
+     * who-columns. If the insert may have happened, the {@code MaybeWrittenException} contains the id. The caller
      * can then find the order, and does not create it again. A validator rejection contains no id.
      */
     public ObjectId insert(Document fields, String user) {

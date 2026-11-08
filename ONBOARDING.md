@@ -154,7 +154,7 @@ The classes, and when you change them:
 
 **`MongoErrorTranslator`** (generic)
 
-- It changes each driver exception into one of our exceptions, with the "outcome unknown" flag.
+- It changes each driver exception into one of our exceptions, as "not written" or "maybe written".
 - You change it when the driver adds an error type.
 
 **`RetryPolicy`** (generic)
@@ -245,7 +245,7 @@ README.md, "The payment-order example", shows the setup and a create, amend and 
   - It reads, calls your `recompute` function, and retries on a conflict.
   - A user write never retries.
 - **`get(id)`** reads the order with `ReadConcern.MAJORITY`.
-  - Use it to reload after a conflict or an "outcome unknown" error.
+  - Use it to reload after a conflict or a `MaybeWrittenException`.
   - It returns the current version for the next write.
   - Do not send the old change with the new version without the check (CONFLICTS.md, "Merge").
 
@@ -294,7 +294,7 @@ The test IDs (T1, E3, S1, G1, ...) are the same as in the tables in SPEC.md (sec
 | Class | Checks |
 |---|---|
 | `OptimisticLockingWriterIT` | The generic writer alone, on a plain `widgets` collection with string ids (G1–G10) |
-| `WriterEdgeCasesIT` | Edge cases of the generic writer: bad input, version types, extreme dates (G12–G18) |
+| `WriterEdgeCasesIT` | Edge cases of the generic writer: bad input, version types, extreme dates (G12–G19) |
 | `RetryPolicyTest` | The retry wait limits (G11), unit test |
 | `OptimisticLockingIT` | Each operation and rule on one client: create, amend, conflicts, status rules, validator, who-columns, dates |
 | `ShutdownIT` | Graceful shutdown: calls in progress finish, later calls are refused, the client closes once (S1–S4) |
@@ -379,7 +379,7 @@ Code review rejects changes that break these rules from CLAUDE.md and SPEC.md.
     default.
 - **On MongoDB 9.0, a `find` fail point also fires during an `update`.** Do not use one to isolate a read that comes
   after an update.
-- **"Outcome unknown" is real.**
+- **"Maybe written" is real.**
   - E7b shows a write that *did* occur, but the caller got an error.
   - Always reload before you make a decision.
 - **By default, the driver decodes BSON dates as `java.util.Date`**, which prints in the JVM's time zone.
@@ -402,7 +402,7 @@ Code review rejects changes that break these rules from CLAUDE.md and SPEC.md.
 | **Read concern `majority`** | Read only data that most servers have, so that it cannot be rolled back |
 | **Retryable writes** | The driver sends a write again after a network failure or an election, without applying it two times |
 | **`timeoutMS`** | A total time limit for each database operation |
-| **Outcome unknown** | We cannot tell if the write happened. Reload to find out |
+| **Maybe written** | We cannot tell if the write happened (`MaybeWrittenException`). Reload to find out |
 | **Fail point** | A MongoDB test feature that makes the server fail commands on purpose |
 | **Pod** | One running copy of the service (Kubernetes). The tests simulate a pod with its own `MongoClient` |
 

@@ -26,7 +26,7 @@ who-columns. The who-columns record the last writer, not a history. The version 
 pod's clock and are for people.
 
 **Generic writer and facade.** The locking mechanism (`com.example.optimistic`) has no payment-order types. Thus, other
-collections can use it, and its tests (G1–G18) check it without the payment-order code. The facade
+collections can use it, and its tests (G1–G19) check it without the payment-order code. The facade
 `PaymentOptimisticWriter` adds only three items: it makes the `ObjectId`, it gives the status rule as the precondition
 filter, and it changes three generic exceptions to their domain subclasses (`OrderNotFoundException`,
 `InvalidStatusException`, `OrderValidationException`). The domain exceptions extend the generic ones. Thus, a caller can
@@ -53,8 +53,8 @@ Keep these decisions when you change the code. Each one has a reason and a test 
 | Only `$set`, `$unset` and `$inc` are allowed | An allow-list fails closed. A key check alone lets `$rename` move a value into a system field. | T25 |
 | `tryUpdate` is separate from `update` | The retry loop uses the versioned write without the diagnosis read. `update` stays the one public path for user writes. | T29 |
 | The precondition check (the status) comes before `recompute` | `recompute` does not run on a cancelled or missing order. | T15 |
-| The caller of the generic writer supplies `_id`; error 11000 is `DuplicateKeyException` | After an "outcome unknown" insert, the caller can find the document. A repeated insert cannot make a second document. | G1 |
-| A `timeoutMS` expiry on a write is always "outcome unknown" | One rule that does not depend on driver internals. | E9, E12 |
+| The caller of the generic writer supplies `_id`; error 11000 is `DuplicateKeyException` | After a "maybe written" insert, the caller can find the document. A repeated insert cannot make a second document. | G1 |
+| A `timeoutMS` expiry on a write is always `WriteTimeoutException` | One rule that does not depend on driver internals. | E9, E12 |
 | `WriteConcern.MAJORITY` and primary reads are pinned in the writer | Client and URI settings cannot make them weaker. | – |
 | `OptimisticWriteException` is sealed (four outcomes); `DataAccessException` is open | A caller maps the no-match outcomes with an exhaustive `switch`. Each domain still adds its own exceptions. | compiler |
 | The writer makes its collection decode BSON dates as `Instant` | All time is UTC `Instant`. No reader sees `java.util.Date` and the JVM's time zone, whatever client built the collection. | G1, T16, T17 |
@@ -77,7 +77,7 @@ forever. Thus, the factory applies a default `timeoutMS` unless the URI sets `ti
 
 **10 s and failovers (decision):** 10 s is longer than a planned stepdown (1–3 s), but shorter than an unplanned
 primary failure (approximately 10 s before the election starts, plus the election). In that case, writes end as
-`OperationTimeoutException` with `outcomeUnknown = true`. A longer `timeoutMS` also needs a longer Kubernetes grace
+`WriteTimeoutException`. A longer `timeoutMS` also needs a longer Kubernetes grace
 period. The OPERATIONS.md failover procedure includes an unplanned failure.
 
 With `timeoutMS`, the driver retries a failed write until the deadline, not only once. Thus, a write continues
@@ -152,7 +152,7 @@ System read-modify-write uses
   (full jitter), then retry. The jitter keeps pods apart on a hot order. `RetryPolicy.defaults()` is 8 attempts, 5 ms
   base, 100 ms maximum (the maximum applies from the sixth wait).
 - **On any transient failure:** stop. If a write possibly occurred, a new calculation can apply it two times.
-- **On an interrupt during the wait:** throw a transient exception with `outcomeUnknown = false` and the
+- **On an interrupt during the wait:** throw `NotSentException` with the
   `InterruptedException` as the cause. The last attempt conflicted, so nothing applied. This is a cancellation, not
   a business conflict (T27).
 - **When no attempts remain:** throw `RetriesExhaustedException`, with the last conflict as its cause. It is an
@@ -164,7 +164,7 @@ System read-modify-write uses
 - **Threads:** the code is safe on virtual threads (Java 25: `synchronized` does not pin, `Thread.sleep` unmounts,
   the gate uses a `ReentrantLock`). But `maxPoolSize` and latency limit throughput, not the number of threads. With
   virtual threads, put a semaphore sized to the pool in front of the service. If not, thousands of calls queue for a
-  connection, and each one that times out is an `OperationTimeoutException` with `outcomeUnknown = true`.
+  connection, and each one that times out is a `WriteTimeoutException`.
 
 ## 5. Data model and validation
 
@@ -233,9 +233,16 @@ DataAccessException                    (com.example.optimistic.exception)
 ├── SchemaValidationException          the 121 cause from the server, or a document over the BSON limit
 │   └── OrderValidationException       (domain) also the field errors from the service checks
 ├── DuplicateKeyException              error 11000; not transient
-├── TransientDataAccessException       sealed; outcomeUnknown(); the caller can retry later
-│   ├── RetriedWriteException          outcomeUnknown always true
-│   └── OperationTimeoutException      timeoutMS expired; outcomeUnknown true on a write
+├── TransientDataAccessException       sealed; the caller can retry later
+│   ├── NotWrittenException            nothing was written: send the same write again
+│   │   ├── ReadTimeoutException       timeoutMS expired on a read
+│   │   └── NotSentException           the request was not sent
+│   └── MaybeWrittenException          the write may have happened: reload first
+│       ├── WriteTimeoutException      timeoutMS expired on a write
+│       ├── RetriedWriteException      the server rejected the driver's retry
+│       ├── WriteNotConfirmedException write-concern error: applied on the primary, not confirmed
+│       ├── ResponseLostException      sent, the response did not arrive
+│       └── ServerOverloadedException  SystemOverloadedError after the driver's retries
 ├── NotAuthorisedMongoException        server code 13; not transient
 └── ShuttingDownException              (domain) call refused during shutdown; no database access
 ```
@@ -252,27 +259,27 @@ diagnosis read) through `MongoErrorTranslator.call(...)`. Its pattern-matching `
 the top, so the sequence of the cases is the classification order. Each exception keeps the document id where it is
 known, and the driver exception as the cause. Classification for driver 5.13.0, checked in the jar:
 
-| Failure on a write | Maps to | `outcomeUnknown` |
+| Failure on a write | Maps to | Why |
 |---|---|---|
 | `MongoWriteException` code 121 | `SchemaValidationException`, reason `REJECTED_BY_VALIDATOR`; the facade throws `OrderValidationException` (id `null` for an insert) | – |
 | `BsonMaximumSizeExceededException` (the driver did not send it) | `SchemaValidationException`, reason `TOO_LARGE`: the message says "is larger than the 16 MB BSON document limit", the cause is the driver exception (E14) | – |
 | `MongoWriteException` code 10334 (the document after an update would exceed 16 MB) | `SchemaValidationException`, reason `TOO_LARGE`, not transient; the cause is the server's write error (G10) | – |
 | `MongoWriteException` with the category `DUPLICATE_KEY` (11000) | `DuplicateKeyException`, not transient (G1) | – |
-| `MongoWriteConcernException`, whatever its code (also 13) | transient | `true`: applied on the primary, not confirmed (E8, E19) |
+| `MongoWriteConcernException`, whatever its code (also 13) | `WriteNotConfirmedException` | applied on the primary, not confirmed (E8, E19) |
 | `MongoSecurityException`, also as a cause | not mapped: the caller gets it as it is (E17) | – |
 | server code 13 (Unauthorized), except a write-concern error | `NotAuthorisedMongoException`, not transient (E18) | – |
 | `MongoWriteException` without an error label (a bad request: 14, 40, 2), except 121, 10334, 11000 | `IllegalArgumentException` (programming error), nothing applied (G16) | – |
 | a read error without an error label, code 2 or 9 (a bad filter) | `IllegalArgumentException` (programming error); other read errors stay transient (G18) | – |
-| `MongoOperationTimeoutException` (`timeoutMS`) | `OperationTimeoutException` | `true`: the driver can retry several times before the deadline, so an earlier attempt may have applied (E9, E12) |
-| `MongoTimeoutException`, `MongoSocketOpenException`, `MongoConnectionPoolClearedException`, label `NoWritesPerformed`, closed client (`IllegalStateException`, E13) | transient | `false`: never sent |
-| socket read/write errors and timeouts, `MongoSocketClosedException`, `MongoInterruptedException` | transient | `true` |
-| `MongoNotPrimaryException`, `MongoNodeIsRecoveringException`, label `RetryableWriteError` | `RetriedWriteException` | `true`: the driver reports only its retry's error (E3, E11) |
+| `MongoOperationTimeoutException` (`timeoutMS`) | `WriteTimeoutException`; on a read, `ReadTimeoutException` (E21) | the driver can retry several times before the deadline, so an earlier attempt may have applied (E9, E12) |
+| `MongoTimeoutException`, `MongoSocketOpenException`, `MongoConnectionPoolClearedException`, label `NoWritesPerformed`, closed client (`IllegalStateException`, E13) | `NotSentException` | never sent |
+| socket read/write errors and timeouts, `MongoSocketClosedException`, `MongoInterruptedException` | `ResponseLostException` | sent, response lost |
+| `MongoNotPrimaryException`, `MongoNodeIsRecoveringException`, label `RetryableWriteError` | `RetriedWriteException` | the driver reports only its retry's error (E3, E11) |
 | `CodecConfigurationException` | `IllegalArgumentException` (programming error) | – |
-| label `SystemOverloadedError` (the server sheds load; the driver already retried) | transient, no `WARN` (E20) | `true` |
-| any other driver exception | transient, logged at `WARN` | `true` |
+| label `SystemOverloadedError` (the server sheds load; the driver already retried) | `ServerOverloadedException`, no `WARN` (E20) | the driver already retried |
+| any other driver exception | `MaybeWrittenException` (no subtype), logged at `WARN` (G19) | unknown, so the safe answer |
 
-- **Reads** (the read in `updateWithRetry` and the diagnosis read) do not write. Thus, they are always
-  `outcomeUnknown = false` (E10).
+- **Reads** (the read in `updateWithRetry` and the diagnosis read) do not write. Thus, they are always a
+  `NotWrittenException` (E10): `ReadTimeoutException` (E21), `NotSentException`, or the general type.
 - **Why `RetriedWriteException`:** after a failed retry, the driver reports the error of the retry. It drops the
   error of the first attempt, unless the error of the retry has `NoWritesPerformed`
   (`SpecRetryPolicy.decideWriteProspectiveFailedResult`, checked in the 5.13 bytecode). Thus, a server rejection
@@ -303,7 +310,7 @@ known, and the driver exception as the cause. Classification for driver 5.13.0, 
   result normally (S3). The alternative was to interrupt the threads of the callers. It was rejected, because it
   interrupts threads that we do not own, for example web-server request threads. Thus, the termination grace period
   of the pod must be more than the `preStop` sleep plus `grace` plus `timeoutMS` (OPERATIONS.md).
-- **A call after the client closed** is mapped to transient, not applied (E13).
+- **A call after the client closed** is mapped to `NotSentException` (E13).
 
 ## 8. Caller identity
 

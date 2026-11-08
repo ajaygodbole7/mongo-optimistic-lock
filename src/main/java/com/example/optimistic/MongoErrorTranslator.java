@@ -5,11 +5,18 @@ import static com.example.optimistic.exception.SchemaValidationException.Reason.
 
 import com.example.optimistic.exception.DataAccessException;
 import com.example.optimistic.exception.DuplicateKeyException;
+import com.example.optimistic.exception.MaybeWrittenException;
 import com.example.optimistic.exception.NotAuthorisedMongoException;
-import com.example.optimistic.exception.OperationTimeoutException;
+import com.example.optimistic.exception.NotSentException;
+import com.example.optimistic.exception.NotWrittenException;
+import com.example.optimistic.exception.ReadTimeoutException;
+import com.example.optimistic.exception.ResponseLostException;
 import com.example.optimistic.exception.RetriedWriteException;
 import com.example.optimistic.exception.SchemaValidationException;
+import com.example.optimistic.exception.ServerOverloadedException;
 import com.example.optimistic.exception.TransientDataAccessException;
+import com.example.optimistic.exception.WriteNotConfirmedException;
+import com.example.optimistic.exception.WriteTimeoutException;
 import com.mongodb.ErrorCategory;
 import com.mongodb.MongoConnectionPoolClearedException;
 import com.mongodb.MongoException;
@@ -58,11 +65,8 @@ final class MongoErrorTranslator {
     private MongoErrorTranslator() {
     }
 
-    /** What a database call does. This decides what {@code outcomeUnknown} can mean. */
+    /** What a database call does. A failed read never wrote, so it is always {@link NotWrittenException}. */
     enum Kind { READ, INSERT, UPDATE }
-
-    /** What a driver failure means for the write. */
-    private enum Outcome { NOT_APPLIED, UNKNOWN, RETRIED, UNCLASSIFIED }
 
     /** Runs one database call, and translates what it throws. */
     static <T> T call(Object id, Kind kind, Supplier<T> operation) {
@@ -85,7 +89,7 @@ final class MongoErrorTranslator {
                     new IllegalArgumentException("Value has no BSON codec: " + e.getMessage(), e);
             // The client is closed: nothing was sent.
             case IllegalStateException _ when CLOSED_CLIENT_MESSAGE.equals(e.getMessage()) ->
-                    new TransientDataAccessException(id, false, e);
+                    new NotSentException(id, e);
             default -> e; // a programming error: not translated
         };
     }
@@ -96,8 +100,8 @@ final class MongoErrorTranslator {
      *   <li>A write error 121 (validator) or 10334 (the document would exceed 16 MB) is
      *       {@link SchemaValidationException}, and a write error 11000 is {@link DuplicateKeyException}. None is
      *       transient.</li>
-     *   <li>A write-concern error means that the primary applied the write, whatever its code (also 13, E19). Thus,
-     *       it comes before the code-13 case.</li>
+     *   <li>A write-concern error means that the primary applied the write, whatever its code (also 13, E19):
+     *       {@link WriteNotConfirmedException}. Thus, it comes before the code-13 case.</li>
      *   <li>Code 13 (Unauthorized) is {@link NotAuthorisedMongoException}: not transient.</li>
      *   <li>Any other write error without an error label is a bad request (for example 14, {@code $inc} on a string;
      *       40, conflicting paths; 2, a bad filter): {@link IllegalArgumentException}, nothing applied. The driver
@@ -105,8 +109,9 @@ final class MongoErrorTranslator {
      *       had applied returns the same result, not a write error (the retryable-writes specification).</li>
      *   <li>A read error without an error label and with code 2 (BadValue) or 9 (FailedToParse) is a bad filter:
      *       {@link IllegalArgumentException}. All other read errors stay transient (for example a stepdown).</li>
-     *   <li>A {@code timeoutMS} expiry is {@link OperationTimeoutException}, outcome unknown on a write: the driver
-     *       can retry several times before the deadline, and an earlier attempt can have applied.</li>
+     *   <li>A {@code timeoutMS} expiry is {@link ReadTimeoutException} on a read. On a write, it is
+     *       {@link WriteTimeoutException}: the driver can retry several times before the deadline, and an earlier
+     *       attempt can have applied.</li>
      *   <li>All other failures are transient ({@link #transientFailure}).</li>
      * </ul>
      */
@@ -118,7 +123,7 @@ final class MongoErrorTranslator {
                     new SchemaValidationException(idUnlessInsert(id, kind), TOO_LARGE, e);
             case MongoWriteException w when w.getError().getCategory() == ErrorCategory.DUPLICATE_KEY ->
                     new DuplicateKeyException(id, e);
-            case MongoWriteConcernException _ -> transientFailure(id, kind, e);
+            case MongoWriteConcernException _ -> new WriteNotConfirmedException(id, e);
             case MongoServerException s when s.getCode() == UNAUTHORIZED ->
                     new NotAuthorisedMongoException(idUnlessInsert(id, kind), e); // a retry cannot help
             case MongoWriteException w when w.getErrorLabels().isEmpty() -> new IllegalArgumentException(
@@ -126,49 +131,44 @@ final class MongoErrorTranslator {
             case MongoServerException s when kind == Kind.READ && s.getErrorLabels().isEmpty()
                     && BAD_QUERY.contains(s.getCode()) -> new IllegalArgumentException(
                     "The server rejected the filter for document " + id + ": " + s.getMessage(), e);
-            case MongoOperationTimeoutException _ -> new OperationTimeoutException(id, kind != Kind.READ, e);
+            case MongoOperationTimeoutException _ -> kind == Kind.READ
+                    ? new ReadTimeoutException(id, e) : new WriteTimeoutException(id, e);
             default -> transientFailure(id, kind, e);
         };
     }
 
-    /** A transient failure. A failed read did not write, so its outcome is always known. */
-    private static TransientDataAccessException transientFailure(Object id, Kind kind, MongoException e) {
-        Outcome outcome = classify(e);
-        if (outcome == Outcome.UNCLASSIFIED) {
-            log.warn("Unclassified driver exception for document {}; treating as transient", id, e);
-        }
-        return switch (kind == Kind.READ ? Outcome.NOT_APPLIED : outcome) {
-            case NOT_APPLIED -> new TransientDataAccessException(id, false, e);
-            case RETRIED -> new RetriedWriteException(id, e);
-            case UNKNOWN, UNCLASSIFIED -> new TransientDataAccessException(id, true, e);
-        };
-    }
-
     /**
-     * What the failure means for the write:
+     * A transient failure, with the subtype that names its reason. The sequence of the cases is the rule:
      * <ul>
-     *   <li>A write-concern error has the {@code RetryableWriteError} label, and so do network errors. Thus, both
-     *       come before the label case.</li>
+     *   <li>Network errors have the {@code RetryableWriteError} label. Thus, they come before the label case.</li>
      *   <li>A command error that gets here comes from the driver's retry (retryable writes are always on). The
      *       driver reports only the error of the retry, unless it has {@code NoWritesPerformed}. Thus, the first
-     *       attempt can have applied: {@link RetriedWriteException}, outcome unknown.</li>
+     *       attempt can have applied: {@link RetriedWriteException}.</li>
+     *   <li>A failed read did not write. A reason that says "may have been written" becomes
+     *       {@link NotWrittenException} on a read.</li>
      * </ul>
      */
-    private static Outcome classify(MongoException e) {
-        return switch (e) {
-            case MongoWriteConcernException _ -> Outcome.UNKNOWN; // applied on the primary, not confirmed
-            case MongoException m when m.hasErrorLabel(NO_WRITES_PERFORMED) -> Outcome.NOT_APPLIED;
+    private static TransientDataAccessException transientFailure(Object id, Kind kind, MongoException e) {
+        TransientDataAccessException failure = switch (e) {
+            case MongoException m when m.hasErrorLabel(NO_WRITES_PERFORMED) -> new NotWrittenException(id, e);
             case MongoTimeoutException _, MongoSocketOpenException _, MongoConnectionPoolClearedException _ ->
-                    Outcome.NOT_APPLIED; // never sent
+                    new NotSentException(id, e);
             case MongoSocketReadException _, MongoSocketReadTimeoutException _, MongoSocketClosedException _,
                  MongoSocketWriteException _, MongoSocketWriteTimeoutException _, MongoInterruptedException _ ->
-                    Outcome.UNKNOWN; // may have been sent; response lost
+                    new ResponseLostException(id, e);
             // The server shed load and the driver already retried: an attempt can have applied.
-            case MongoException m when m.hasErrorLabel(MongoException.SYSTEM_OVERLOADED_ERROR_LABEL) -> Outcome.UNKNOWN;
-            case MongoNotPrimaryException _, MongoNodeIsRecoveringException _ -> Outcome.RETRIED;
-            case MongoException m when m.hasErrorLabel(RETRYABLE_WRITE_ERROR) -> Outcome.RETRIED;
-            default -> Outcome.UNCLASSIFIED;
+            case MongoException m when m.hasErrorLabel(MongoException.SYSTEM_OVERLOADED_ERROR_LABEL) ->
+                    new ServerOverloadedException(id, e);
+            // Rejected by the driver's retry: the first attempt can have applied.
+            case MongoNotPrimaryException _, MongoNodeIsRecoveringException _ -> new RetriedWriteException(id, e);
+            case MongoException m when m.hasErrorLabel(RETRYABLE_WRITE_ERROR) -> new RetriedWriteException(id, e);
+            default -> {
+                log.warn("Unclassified driver exception for document {}; treating as transient", id, e);
+                yield new MaybeWrittenException(id, e);
+            }
         };
+        boolean readSaysMaybeWritten = kind == Kind.READ && !(failure instanceof NotWrittenException);
+        return readSaysMaybeWritten ? new NotWrittenException(id, e) : failure;
     }
 
     /** An insert that failed stored nothing, so its id is not reported. */

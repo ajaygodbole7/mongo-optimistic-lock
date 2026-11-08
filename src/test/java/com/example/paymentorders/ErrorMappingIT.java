@@ -12,9 +12,15 @@ import com.example.optimistic.OptimisticLockingWriter;
 import com.example.optimistic.RetryPolicy;
 import com.example.optimistic.exception.DataAccessException;
 import com.example.optimistic.exception.NotAuthorisedMongoException;
-import com.example.optimistic.exception.OperationTimeoutException;
+import com.example.optimistic.exception.NotSentException;
+import com.example.optimistic.exception.NotWrittenException;
+import com.example.optimistic.exception.ReadTimeoutException;
+import com.example.optimistic.exception.ResponseLostException;
 import com.example.optimistic.exception.RetriedWriteException;
+import com.example.optimistic.exception.ServerOverloadedException;
 import com.example.optimistic.exception.TransientDataAccessException;
+import com.example.optimistic.exception.WriteNotConfirmedException;
+import com.example.optimistic.exception.WriteTimeoutException;
 import com.example.paymentorders.exception.OrderValidationException;
 import com.mongodb.MongoClientSettings;
 import com.mongodb.MongoException;
@@ -98,7 +104,7 @@ class ErrorMappingIT {
                 .append("data", data.append("failCommands", commands).append("appName", APP)));
     }
 
-    /** How a caller resolves "outcome unknown": a majority read, which does not return a write that can roll back. */
+    /** How a caller resolves "maybe written": a majority read, which does not return a write that can roll back. */
     private Document majorityReload() {
         return collection(setupClient).withReadConcern(ReadConcern.MAJORITY).find(eq("_id", id)).first();
     }
@@ -146,7 +152,7 @@ class ErrorMappingIT {
     }
 
     @Test
-    void e3_rejectedRetryIsRetriedWriteWithOutcomeUnknown() {
+    void e3_rejectedRetryMayHaveBeenWritten() {
         failUpdates(new Document("times", 2), new Document("errorCode", 10107));
 
         TransientDataAccessException e = transientFailure(() -> service(ONE_RETRY).amend(id, 1L, remittance("e3"), "bob"));
@@ -154,27 +160,26 @@ class ErrorMappingIT {
         // The driver reports only the retry's error, so the first attempt might have applied. Here both were
         // rejected, which only a reload can tell the caller.
         assertThat(e).isInstanceOf(RetriedWriteException.class);
-        assertThat(e.outcomeUnknown()).isTrue();
         assertThat(version()).isEqualTo(1L);
     }
 
     @Test
-    void e4_droppedConnectionIsTransientWithOutcomeUnknown() {
+    void e4_droppedConnectionMayHaveBeenWritten() {
         failUpdates(new Document("times", 2), new Document("closeConnection", true));
 
         TransientDataAccessException e = transientFailure(() -> service(ONE_RETRY).amend(id, 1L, remittance("e4"), "bob"));
 
-        assertThat(e.outcomeUnknown()).isTrue();
+        assertThat(e).isInstanceOf(ResponseLostException.class);
     }
 
     @Test
-    void e5_socketReadTimeoutIsTransientWithOutcomeUnknown() {
+    void e5_socketReadTimeoutMayHaveBeenWritten() {
         failUpdates(new Document("times", 2), new Document("blockConnection", true).append("blockTimeMS", 1500));
 
         TransientDataAccessException e = transientFailure(
                 () -> service("socketTimeoutMS=300").amend(id, 1L, remittance("e5"), "bob"));
 
-        assertThat(e.outcomeUnknown()).isTrue();
+        assertThat(e).isInstanceOf(ResponseLostException.class);
     }
 
     @Test
@@ -204,34 +209,33 @@ class ErrorMappingIT {
 
         TransientDataAccessException e = transientFailure(() -> service.amend(other, 1L, remittance("e6"), "bob"));
 
-        assertThat(e.outcomeUnknown()).isFalse();
+        assertThat(e).isInstanceOf(NotSentException.class);
         assertThat(holder.get(10, TimeUnit.SECONDS)).isEqualTo(2L);
         assertThat(OptimisticLockingWriter.readVersion(collection(setupClient).find(eq("_id", other)).first()))
                 .isEqualTo(1L);
     }
 
-    /** E8: a write-concern error means that the primary applied the write. The outcome is not "not applied". */
+    /** E8: a write-concern error means that the primary applied the write. It is "maybe written", not "not written". */
     @Test
-    void e8_writeConcernErrorIsOutcomeUnknownAndWasApplied() {
+    void e8_writeConcernErrorMayHaveBeenWrittenAndWas() {
         failUpdates(new Document("times", 2), new Document("writeConcernError",
                 new Document("code", 91).append("codeName", "ShutdownInProgress").append("errmsg", "shutting down")));
 
         TransientDataAccessException e = transientFailure(() -> service("").amend(id, 1L, remittance("e8"), "bob"));
 
-        assertThat(e.outcomeUnknown()).isTrue();
+        assertThat(e).isInstanceOf(WriteNotConfirmedException.class);
         assertThat(version()).as("the primary applied it").isEqualTo(2L);
     }
 
     /** E9: a client-side operation timeout (timeoutMS) can occur after the write was sent. */
     @Test
-    void e9_operationTimeoutAfterSendIsOutcomeUnknown() {
+    void e9_operationTimeoutAfterSendMayHaveBeenWritten() {
         failUpdates(new Document("times", 2), new Document("blockConnection", true).append("blockTimeMS", 1500));
 
         TransientDataAccessException e = transientFailure(
                 () -> service("timeoutMS=400").amend(id, 1L, remittance("e9"), "bob"));
 
-        assertThat(e).isInstanceOf(OperationTimeoutException.class);
-        assertThat(e.outcomeUnknown()).isTrue();
+        assertThat(e).isInstanceOf(WriteTimeoutException.class);
         assertThat(e.getCause()).isInstanceOf(com.mongodb.MongoOperationTimeoutException.class);
     }
 
@@ -241,7 +245,7 @@ class ErrorMappingIT {
      * {@code update}. Thus, it cannot isolate the diagnosis read that comes after an update.)
      */
     @Test
-    void e10_failedReadIsNeverOutcomeUnknown() {
+    void e10_failedReadIsNotWritten() {
         MongoClient client = MongoTestSupport.newPod("appName=" + APP + "&" + ONE_RETRY);
         clients.add(client);
         PaymentOptimisticWriter writer = new PaymentOptimisticWriter(collection(client));
@@ -251,31 +255,48 @@ class ErrorMappingIT {
                 java.util.Set.of(PaymentOrderStatus.DRAFT), MongoTestSupport::incrementAmount, "system",
                 RetryPolicy.defaults()));
 
-        assertThat(e.outcomeUnknown()).isFalse();
+        assertThat(e).isInstanceOf(NotWrittenException.class);
+        assertThat(version()).isEqualTo(1L);
+    }
+
+    /** E21: a timeoutMS expiry on a read is its own type. A read does not write, so it is "not written". */
+    @Test
+    void e21_readTimeoutIsNotWritten() {
+        MongoClient client = MongoTestSupport.newPod("appName=" + APP + "&timeoutMS=400");
+        clients.add(client);
+        PaymentOptimisticWriter writer = new PaymentOptimisticWriter(collection(client));
+        failCommands(List.of("find"), new Document("times", 2),
+                new Document("blockConnection", true).append("blockTimeMS", 1500));
+
+        TransientDataAccessException e = transientFailure(() -> writer.updateWithRetry(id,
+                java.util.Set.of(PaymentOrderStatus.DRAFT), MongoTestSupport::incrementAmount, "system",
+                RetryPolicy.defaults()));
+
+        assertThat(e).isInstanceOf(ReadTimeoutException.class);
+        assertThat(e.getCause()).isInstanceOf(com.mongodb.MongoOperationTimeoutException.class);
         assertThat(version()).isEqualTo(1L);
     }
 
     /** E11: after a failed retry, "not primary" can hide a first attempt that applied. For an insert, say unknown. */
     @Test
-    void e11_insertRejectedByNonPrimaryIsOutcomeUnknown() {
+    void e11_insertRejectedByNonPrimaryMayHaveBeenWritten() {
         failCommands(List.of("insert"), new Document("times", 2), new Document("errorCode", 10107));
 
         TransientDataAccessException e = transientFailure(() -> service(ONE_RETRY).create(sampleOrder(), "bob"));
 
         assertThat(e).isInstanceOf(RetriedWriteException.class);
-        assertThat(e.outcomeUnknown()).isTrue();
         // The writer generates the _id before sending, so the caller can look the order up instead of creating
         // it again (which could duplicate it). Here both attempts were rejected, so it does not exist.
         assertThat(e.id()).as("generated id carried for lookup").isNotNull();
         assertThat(collection(setupClient).find(eq("_id", e.id())).first()).isNull();
     }
 
-    /** E7: after an "outcome unknown" failure, the caller reloads to find the result. */
+    /** E7: after a "maybe written" failure, the caller reloads to find the result. */
     @Test
-    void e7_reloadResolvesOutcomeUnknown() {
+    void e7_reloadTellsWhetherItWasWritten() {
         failUpdates(new Document("times", 2), new Document("closeConnection", true));
         TransientDataAccessException e = transientFailure(() -> service(ONE_RETRY).amend(id, 1L, remittance("e7"), "bob"));
-        assertThat(e.outcomeUnknown()).isTrue();
+        assertThat(e).isInstanceOf(ResponseLostException.class);
 
         Document reloaded = majorityReload();
 
@@ -285,14 +306,14 @@ class ErrorMappingIT {
         assertThat(reloaded.getEmbedded(List.of("remittance", "unstructured"), String.class)).isEqualTo("Invoice 4471");
     }
 
-    /** E7b: the reason for "outcome unknown": the write applied, but the response was lost. */
+    /** E7b: the reason for "maybe written": the write applied, but the response was lost. */
     @Test
-    void e7b_reloadShowsAWriteThatAppliedDespiteOutcomeUnknown() {
+    void e7b_reloadShowsAMaybeWrittenWriteThatApplied() {
         failUpdates(new Document("times", 2), new Document("blockConnection", true).append("blockTimeMS", 1000));
 
         TransientDataAccessException e = transientFailure(
                 () -> service("socketTimeoutMS=300").amend(id, 1L, remittance("e7b"), "bob"));
-        assertThat(e.outcomeUnknown()).isTrue();
+        assertThat(e).isInstanceOf(ResponseLostException.class);
 
         // The server runs the update once its block ends; the driver's retry is deduplicated by the server.
         Document reloaded = majorityReload();
@@ -304,9 +325,9 @@ class ErrorMappingIT {
         assertThat(reloaded.getEmbedded(List.of("remittance", "unstructured"), String.class)).isEqualTo("e7b");
     }
 
-    /** E12: under timeoutMS, a pool checkout timeout is "outcome unknown", like each timeoutMS expiry on a write. */
+    /** E12: under timeoutMS, a pool checkout timeout is "maybe written", like each timeoutMS expiry on a write. */
     @Test
-    void e12_poolCheckoutTimeoutUnderTimeoutMsIsOperationTimeout() throws Exception {
+    void e12_poolCheckoutTimeoutUnderTimeoutMsIsWriteTimeout() throws Exception {
         ObjectId other = new PaymentOrderService(database(setupClient)).create(sampleOrder(), "alice");
         MongoClient client = MongoTestSupport.newPod("appName=" + APP + "&maxPoolSize=1&timeoutMS=300");
         clients.add(client);
@@ -332,9 +353,8 @@ class ErrorMappingIT {
                 () -> new PaymentOrderService(database(client)).amend(other, 1L, remittance("e12"), "bob"));
 
         // This attempt was never sent, but the classification cannot tell it from an earlier attempt that was:
-        // a timeoutMS expiry on a write is always "outcome unknown".
-        assertThat(e).isInstanceOf(OperationTimeoutException.class);
-        assertThat(e.outcomeUnknown()).isTrue();
+        // a timeoutMS expiry on a write is always "maybe written".
+        assertThat(e).isInstanceOf(WriteTimeoutException.class);
         holder.get(10, TimeUnit.SECONDS);
         assertThat(OptimisticLockingWriter.readVersion(collection(setupClient).find(eq("_id", other)).first()))
                 .isEqualTo(1L);
@@ -349,8 +369,7 @@ class ErrorMappingIT {
 
         DataAccessException e = ourException(() -> service.amend(id, 1L, remittance("e13"), "bob"));
 
-        assertThat(e).isInstanceOfSatisfying(TransientDataAccessException.class,
-                transientFailure -> assertThat(transientFailure.outcomeUnknown()).isFalse());
+        assertThat(e).isInstanceOf(NotSentException.class);
         assertThat(e.getCause()).hasMessage("state should be: open");
         assertThat(version()).isEqualTo(1L);
     }
@@ -423,28 +442,27 @@ class ErrorMappingIT {
 
     /** E19: a write-concern error with code 13 means that the primary applied the write. It is not "not authorised". */
     @Test
-    void e19_writeConcernErrorWithCode13IsOutcomeUnknown() {
+    void e19_writeConcernErrorWithCode13MayHaveBeenWritten() {
         failUpdates(new Document("times", 1), new Document("writeConcernError",
                 new Document("code", 13).append("codeName", "Unauthorized").append("errmsg", "not authorized")));
 
         TransientDataAccessException e = transientFailure(() -> service("").amend(id, 1L, remittance("e19"), "bob"));
 
         assertThat(e).isNotInstanceOf(NotAuthorisedMongoException.class);
-        assertThat(e.outcomeUnknown()).isTrue();
+        assertThat(e).isInstanceOf(WriteNotConfirmedException.class);
         assertThat(version()).as("the primary applied it").isEqualTo(2L);
     }
 
     /** E20: the server sheds load (SystemOverloadedError), and the driver already retried. An attempt can have applied. */
     @Test
-    void e20_systemOverloadedIsTransientWithOutcomeUnknown() {
+    void e20_systemOverloadedMayHaveBeenWritten() {
         failUpdates(new Document("times", 20), new Document("errorCode", 2).append("errorLabels",
                 List.of(MongoException.SYSTEM_OVERLOADED_ERROR_LABEL, MongoException.RETRYABLE_ERROR_LABEL)));
 
         TransientDataAccessException e = transientFailure(
                 () -> service(ONE_RETRY).amend(id, 1L, remittance("e20"), "bob"));
 
-        assertThat(e).isNotInstanceOf(RetriedWriteException.class);
-        assertThat(e.outcomeUnknown()).isTrue();
+        assertThat(e).isInstanceOf(ServerOverloadedException.class);
         assertThat(((MongoException) e.getCause()).hasErrorLabel(MongoException.SYSTEM_OVERLOADED_ERROR_LABEL))
                 .isTrue();
     }

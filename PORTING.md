@@ -3,7 +3,7 @@
 This guide tells you how to use the generic `OptimisticLockingWriter` on a collection that is not `paymentOrders`.
 The writer does two jobs: optimistic locking and the who-columns, with the safety rules that keep both correct. The
 guide also tells you when the pattern does not fit. SPEC.md section 12 is the contract of the generic writer.
-`OptimisticLockingWriterIT` (G1–G10) and `WriterEdgeCasesIT` (G12–G18) check it on a plain collection with string ids and no validator.
+`OptimisticLockingWriterIT` (G1–G10) and `WriterEdgeCasesIT` (G12–G19) check it on a plain collection with string ids and no validator.
 
 ## 1. The pattern in six rules
 
@@ -31,7 +31,7 @@ if (r.getMatchedCount() == 0) {
 ```
 
 `OptimisticLockingWriter` is this code plus the parts that are easy to get wrong: majority writes, the operator
-allow-list, the system-field check, the who-columns, the error classification ("outcome unknown"), and the system
+allow-list, the system-field check, the who-columns, the error classification (not written or maybe written), and the system
 retry loop with full jitter.
 
 ## 2. Use the generic writer
@@ -50,7 +50,7 @@ long v3 = widgets.updateWithRetry("w-1", null,                     // null: no p
         "svc-pricing", RetryPolicy.defaults());
 ```
 
-- **`K`** is the type of `_id`. The caller makes the id before the insert. Thus, after an "outcome unknown" insert,
+- **`K`** is the type of `_id`. The caller makes the id before the insert. Thus, after a "maybe written" insert,
   the caller can look up the document. A second insert with the same id gives `DuplicateKeyException`, not a
   second document.
 - **Field names** are fixed: `_documentMeta.version` (`OptimisticLockingWriter.DOCUMENT_META`, `VERSION_FIELD`) and
@@ -105,7 +105,7 @@ These parts are not in the generic package. Replace them for your collection:
    `moderate`, backfill, then `strict` (SPEC.md section 7).
 5. **Test each precondition** with a document that matches it and one that does not (G3, G7).
 6. **Map the exceptions** to your API: conflict → 409 with the current document; precondition failed → 409 or 422;
-   not found → 404; `DuplicateKeyException` → 409; transient with `outcomeUnknown` → reload first.
+   not found → 404; `DuplicateKeyException` → 409; `MaybeWrittenException` → reload first; `NotWrittenException` → retry later.
 7. **Decide the retry policy** for system jobs (`RetryPolicy`). A job must requeue on `RetriesExhaustedException`.
 8. **Copy the tests:** the lost-update oracle (each write sets a value to the value that it read + 1), a latch
    race with one winner, and the fail-point tests for the error classification (DESIGN.md section 9).
@@ -121,7 +121,7 @@ These parts are not in the generic package. Replace them for your collection:
 - **Upserts.** Do not use an upsert with a version filter. If the version moved, the filter matches nothing, and the
   upsert tries to insert a second document with the same `_id`. MongoDB rejects it with error 11000. Use `insert`
   for a new document, and `update` for an existing one. On `DuplicateKeyException`, read the document and update it.
-- **Retries after "outcome unknown".** A retried update applies at most once: if the first attempt applied, the
+- **Retries after `MaybeWrittenException`.** A retried update applies at most once: if the first attempt applied, the
   version moved, and the retry gets a conflict. That conflict can be your own write. Reload and compare before you
   decide. A retried insert with the same id gets `DuplicateKeyException`, which also means "look it up".
 - **Pinned settings.** The writer always uses `WriteConcern.MAJORITY` and primary reads, and reads BSON dates as

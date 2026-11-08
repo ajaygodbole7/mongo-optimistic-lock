@@ -102,9 +102,11 @@ The who-columns are the writer's second job.
 - **One round trip on success.** The diagnosis read happens only after a zero match.
 - **A one-read diagnosis.** A zero match tells the caller which case applies: not found, a version conflict, or a
   failed precondition.
-- **An `outcomeUnknown` flag on each infrastructure failure:**
-  - `false`: the write did not happen, so retry later.
-  - `true`: the write may have happened, so reload before you retry.
+- **Each infrastructure failure says what happened to the data:**
+  - `NotWrittenException`: the write did not happen, so retry later.
+  - `MaybeWrittenException`: the write may have happened, so reload before you retry.
+  - Subtypes name a known reason: not sent, response lost, a read or write timeout, a rejected driver retry, a write
+    that a majority did not confirm, an overloaded server ([ERRORS.md](ERRORS.md)).
 - **No lost updates under load.** The tests check it with races between separate clients and a lost-update oracle.
 - **An operator allow-list.** A change can use only `$set`, `$unset` and `$inc`, so not even `$rename` can reach a
   system field.
@@ -121,7 +123,8 @@ The who-columns are the writer's second job.
   `@CreatedDate`, `@LastModifiedBy` and `@LastModifiedDate` for the who-columns.
 - **If you already use Spring Data,** these annotations are sufficient for the basic case.
 - **This repository uses the plain MongoDB Java driver,** and adds what the annotations do not give you on their own:
-  the one-read diagnosis, the `outcomeUnknown` flag, pinned durability, protected system fields and system retries.
+  the one-read diagnosis, the not-written / maybe-written split, pinned durability, protected system fields and
+  system retries.
 
 ## Stack
 
@@ -197,7 +200,7 @@ Callers get typed exceptions, not raw driver exceptions. ERRORS.md lists each on
 
 - **`VersionConflictException`:** reload, then decide again.
 - **`DocumentNotFoundException`, `PreconditionFailedException`:** tell the caller. Do not retry.
-- **`TransientDataAccessException`:** if `outcomeUnknown()` is true, reload first. If not, retry later.
+- **`TransientDataAccessException`:** on `MaybeWrittenException`, reload first. On `NotWrittenException`, retry later.
 - **`RetriesExhaustedException`:** a system job requeues the work.
 
 ## When not to use it

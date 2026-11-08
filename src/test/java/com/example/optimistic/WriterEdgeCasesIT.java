@@ -5,9 +5,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.optimistic.exception.DuplicateKeyException;
-import com.example.optimistic.exception.TransientDataAccessException;
+import com.example.optimistic.exception.MaybeWrittenException;
+import com.example.optimistic.exception.NotWrittenException;
+import com.example.optimistic.exception.ResponseLostException;
 import com.example.optimistic.exception.VersionConflictException;
 import com.example.paymentorders.MongoTestSupport;
+import com.mongodb.MongoException;
 import com.mongodb.MongoServerException;
 import com.mongodb.MongoWriteException;
 import com.mongodb.client.MongoClient;
@@ -28,7 +31,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * SPEC section 12.2, G12 to G18: edge cases and hostile calls of the generic writer, on a collection with no
+ * SPEC section 12.2, G12 to G19: edge cases and hostile calls of the generic writer, on a collection with no
  * validator.
  */
 class WriterEdgeCasesIT {
@@ -140,8 +143,7 @@ class WriterEdgeCasesIT {
         Thread.currentThread().interrupt();
         try {
             assertThatThrownBy(() -> writer.update("w", 2L, null, Updates.set("name", "c"), "bob"))
-                    .isInstanceOfSatisfying(TransientDataAccessException.class,
-                            e -> assertThat(e.outcomeUnknown()).isTrue());
+                    .isInstanceOf(ResponseLostException.class);
         } finally {
             Thread.interrupted();
         }
@@ -240,12 +242,22 @@ class WriterEdgeCasesIT {
                     MongoTestSupport.database(failing).getCollection("edgeWidgets"), InstantSource.fixed(NOW));
             assertThatThrownBy(() -> viaFailing.updateWithRetry("w", null, _ -> Updates.set("name", "b"), "job",
                     RetryPolicy.defaults()))
-                    .isInstanceOfSatisfying(TransientDataAccessException.class,
-                            e -> assertThat(e.outcomeUnknown()).isFalse());
+                    .isInstanceOf(NotWrittenException.class);
         } finally {
             client.getDatabase("admin")
                     .runCommand(new Document("configureFailPoint", "failCommand").append("mode", "off"));
         }
         assertThat(stored()).isEqualTo(before);
+    }
+
+    @Test
+    void g19_unclassifiedDriverExceptionIsTheGeneralType() {
+        MongoException unknown = new MongoException("no code, no label");
+        assertThatThrownBy(() -> MongoErrorTranslator.call("w", MongoErrorTranslator.Kind.UPDATE, () -> {
+            throw unknown;
+        })).isExactlyInstanceOf(MaybeWrittenException.class).hasCause(unknown);
+        assertThatThrownBy(() -> MongoErrorTranslator.call("w", MongoErrorTranslator.Kind.READ, () -> {
+            throw unknown;
+        })).isExactlyInstanceOf(NotWrittenException.class).hasCause(unknown);
     }
 }

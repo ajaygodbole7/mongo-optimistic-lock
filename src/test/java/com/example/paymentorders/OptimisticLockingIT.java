@@ -10,7 +10,7 @@ import com.example.optimistic.OptimisticLockingWriter;
 import com.example.optimistic.RetryPolicy;
 import com.example.optimistic.exception.RetriesExhaustedException;
 import com.example.optimistic.exception.SchemaValidationException;
-import com.example.optimistic.exception.TransientDataAccessException;
+import com.example.optimistic.exception.NotSentException;
 import com.example.optimistic.exception.VersionConflictException;
 import com.example.paymentorders.exception.InvalidStatusException;
 import com.example.paymentorders.exception.OrderNotFoundException;
@@ -355,7 +355,7 @@ class OptimisticLockingIT {
     /**
      * An interrupt during the wait between attempts is a cancellation, not a business conflict. The interrupt must
      * occur during the wait. If the thread is already interrupted, the driver fails its next call with
-     * MongoInterruptedException, which is correctly "outcome unknown". The worker is a platform thread on purpose: a
+     * MongoInterruptedException, which is correctly "maybe written". The worker is a platform thread on purpose: a
      * platform thread that waits for a socket is RUNNABLE, so TIMED_WAITING means the backoff sleep. A virtual thread
      * reports TIMED_WAITING for both.
      */
@@ -389,8 +389,7 @@ class OptimisticLockingIT {
         }
         worker.join(10_000);
 
-        assertThat(thrown.get()).as("%s", thrown.get()).isInstanceOfSatisfying(TransientDataAccessException.class, e -> {
-            assertThat(e.outcomeUnknown()).isFalse();
+        assertThat(thrown.get()).as("%s", thrown.get()).isInstanceOfSatisfying(NotSentException.class, e -> {
             assertThat(e.getCause()).isInstanceOf(InterruptedException.class);
         });
         assertThat(MongoTestSupport.amountOf(load(id))).as("the system write never applied")
