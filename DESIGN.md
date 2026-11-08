@@ -234,7 +234,7 @@ DataAccessException                    (com.example.optimistic.exception)
 │   └── OrderValidationException       (domain) also the field errors from the service checks
 ├── DuplicateKeyException              error 11000; not transient
 ├── TransientDataAccessException       sealed; the caller can retry later
-│   ├── NotWrittenException            nothing was written: send the same write again
+│   ├── NotWrittenException            nothing was written: retry later; the version check still applies
 │   │   ├── ReadTimeoutException       timeoutMS expired on a read
 │   │   └── NotSentException           the request was not sent
 │   └── MaybeWrittenException          the write may have happened: reload first
@@ -271,7 +271,8 @@ known, and the driver exception as the cause. Classification for driver 5.13.0, 
 | `MongoWriteException` without an error label (a bad request: 14, 40, 2), except 121, 10334, 11000 | `IllegalArgumentException` (programming error), nothing applied (G16) | – |
 | a read error without an error label, code 2 or 9 (a bad filter) | `IllegalArgumentException` (programming error); other read errors stay transient (G18) | – |
 | `MongoOperationTimeoutException` (`timeoutMS`) | `WriteTimeoutException`; on a read, `ReadTimeoutException` (E21) | the driver can retry several times before the deadline, so an earlier attempt may have applied (E9, E12) |
-| `MongoTimeoutException`, `MongoSocketOpenException`, `MongoConnectionPoolClearedException`, label `NoWritesPerformed`, closed client (`IllegalStateException`, E13) | `NotSentException` | never sent |
+| `MongoTimeoutException`, `MongoSocketOpenException`, `MongoConnectionPoolClearedException`, closed client (`IllegalStateException`, E13) | `NotSentException` | never sent. On the driver's retry, a failure in server selection or connection checkout keeps the first attempt's error (`SpecRetryPolicy.decideWriteProspectiveFailedResult`, driver 5.13 source). Thus, this type means that the only attempt was not sent |
+| label `NoWritesPerformed` | `NotWrittenException` | sent, but the server wrote nothing |
 | socket read/write errors and timeouts, `MongoSocketClosedException`, `MongoInterruptedException` | `ResponseLostException` | sent, response lost |
 | `MongoNotPrimaryException`, `MongoNodeIsRecoveringException`, label `RetryableWriteError` | `RetriedWriteException` | the driver reports only its retry's error (E3, E11) |
 | `CodecConfigurationException` | `IllegalArgumentException` (programming error) | – |

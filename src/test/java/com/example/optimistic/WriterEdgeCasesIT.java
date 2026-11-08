@@ -8,7 +8,6 @@ import com.example.optimistic.exception.DuplicateKeyException;
 import com.example.optimistic.exception.MaybeWrittenException;
 import com.example.optimistic.exception.NotWrittenException;
 import com.example.optimistic.exception.ResponseLostException;
-import com.example.optimistic.exception.TransientDataAccessException;
 import com.example.optimistic.exception.VersionConflictException;
 import com.example.paymentorders.MongoTestSupport;
 import com.mongodb.MongoException;
@@ -179,16 +178,12 @@ class WriterEdgeCasesIT {
         insertRaw(1L);
         String app = "edgeRetry";
         try (MongoClient retrying = MongoClients.create(MongoTestSupport.connectionString("appName=" + app))) {
-            client.getDatabase("admin").runCommand(new Document("configureFailPoint", "failCommand")
-                    .append("mode", new Document("times", 1))
-                    .append("data", new Document("failCommands", List.of("update")).append("closeConnection", true)
-                            .append("appName", app)));
+            armFailPoint(app, "update", 1, new Document("closeConnection", true));
             OptimisticLockingWriter<String> viaRetry = new OptimisticLockingWriter<>(
                     MongoTestSupport.database(retrying).getCollection("edgeWidgets"), InstantSource.fixed(NOW));
             assertRejected(viaRetry, 1L, null, Updates.inc("name", 1), 14);
         } finally {
-            client.getDatabase("admin")
-                    .runCommand(new Document("configureFailPoint", "failCommand").append("mode", "off"));
+            disarmFailPoint();
         }
     }
 
@@ -258,10 +253,11 @@ class WriterEdgeCasesIT {
             assertThatThrownBy(systemRead).isInstanceOf(NotWrittenException.class);
             disarmFailPoint();
 
-            // The rule is for reads only: code 2 as a command error on an update is not a bad filter.
+            // The rule is for reads only: code 2 as a command error on an update is not a bad filter. The caller cannot
+            // tell the first attempt from the driver's retry, so it is the general "maybe written" type.
             armFailPoint(app, "update", 1, new Document("errorCode", 2));
             assertThatThrownBy(() -> viaFailing.update("w", 1L, null, Updates.set("name", "b"), "bob"))
-                    .isInstanceOf(TransientDataAccessException.class);
+                    .isExactlyInstanceOf(MaybeWrittenException.class);
             disarmFailPoint();
         } finally {
             disarmFailPoint();

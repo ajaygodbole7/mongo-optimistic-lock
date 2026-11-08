@@ -1,8 +1,9 @@
 package com.example.optimistic.exception;
 
 /**
- * A transient failure where nothing was written: the request was not sent, the operation was a read, or the thread
- * was interrupted before a write. The caller can send the same write again. A subtype names a known reason.
+ * A transient failure where nothing was written: the request was not sent, the operation was a read, or the server
+ * reported that it performed no write. The caller can retry later; the version check still applies. A subtype names a
+ * known reason.
  */
 public sealed class NotWrittenException extends TransientDataAccessException
         permits ReadTimeoutException, NotSentException {

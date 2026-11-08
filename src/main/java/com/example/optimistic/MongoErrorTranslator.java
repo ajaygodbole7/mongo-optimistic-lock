@@ -141,9 +141,12 @@ final class MongoErrorTranslator {
      * A transient failure, with the subtype that names its reason. The sequence of the cases is the rule:
      * <ul>
      *   <li>Network errors have the {@code RetryableWriteError} label. Thus, they come before the label case.</li>
-     *   <li>A command error that gets here comes from the driver's retry (retryable writes are always on). The
-     *       driver reports only the error of the retry, unless it has {@code NoWritesPerformed}. Thus, the first
-     *       attempt can have applied: {@link RetriedWriteException}.</li>
+     *   <li>A not-primary, node-recovering or {@code RetryableWriteError} error that gets here comes from the
+     *       driver's retry (retryable writes are always on). The driver reports only the error of the retry, unless
+     *       it has {@code NoWritesPerformed}. Thus, the first attempt can have applied: {@link RetriedWriteException}.
+     *       </li>
+     *   <li>Any other command error can come from the first attempt or from the retry. The caller cannot tell, so it
+     *       is {@link MaybeWrittenException}, logged as unclassified.</li>
      *   <li>A failed read did not write. A reason that says "may have been written" becomes
      *       {@link NotWrittenException} on a read.</li>
      * </ul>

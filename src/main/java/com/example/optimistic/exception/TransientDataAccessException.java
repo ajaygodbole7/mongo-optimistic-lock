@@ -4,7 +4,8 @@ package com.example.optimistic.exception;
  * An infrastructure failure (election, network, timeout, pool exhaustion). The caller can retry later. The subtype
  * tells what happened to the data:
  * <ul>
- *   <li>{@link NotWrittenException}: nothing was written. The caller can send the same write again.</li>
+ *   <li>{@link NotWrittenException}: nothing was written. The caller can retry later; the version check still
+ *       applies.</li>
  *   <li>{@link MaybeWrittenException}: the write may have happened. Reload the document with
  *       {@code ReadConcern.MAJORITY} before you retry.</li>
  * </ul>
