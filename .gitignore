@@ -3,3 +3,6 @@ target/
 .DS_Store
 .claude/skills/
 .review/
+.classpath
+.project
+.settings/
