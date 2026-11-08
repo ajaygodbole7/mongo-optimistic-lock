@@ -8,6 +8,7 @@ import com.example.optimistic.exception.DuplicateKeyException;
 import com.example.optimistic.exception.MaybeWrittenException;
 import com.example.optimistic.exception.NotWrittenException;
 import com.example.optimistic.exception.ResponseLostException;
+import com.example.optimistic.exception.TransientDataAccessException;
 import com.example.optimistic.exception.VersionConflictException;
 import com.example.paymentorders.MongoTestSupport;
 import com.mongodb.MongoException;
@@ -23,6 +24,7 @@ import java.time.InstantSource;
 import java.util.Date;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.bson.Document;
 import org.bson.conversions.Bson;
 import org.junit.jupiter.api.AfterAll;
@@ -230,24 +232,51 @@ class WriterEdgeCasesIT {
         assertThat(calls).hasValue(0);
         assertThat(stored()).isEqualTo(before);
 
-        // A server error on a read that is not a bad request stays transient: here ShutdownInProgress (91) twice, so
-        // that the driver's one read retry also fails.
+        // Each condition of the bad-filter rule, on one client. Without its error, each call would succeed and the
+        // test would fail.
         String app = "edgeRead";
         try (MongoClient failing = MongoClients.create(MongoTestSupport.connectionString("appName=" + app))) {
-            client.getDatabase("admin").runCommand(new Document("configureFailPoint", "failCommand")
-                    .append("mode", new Document("times", 2))
-                    .append("data", new Document("failCommands", List.of("find")).append("errorCode", 91)
-                            .append("appName", app)));
             OptimisticLockingWriter<String> viaFailing = new OptimisticLockingWriter<>(
                     MongoTestSupport.database(failing).getCollection("edgeWidgets"), InstantSource.fixed(NOW));
-            assertThatThrownBy(() -> viaFailing.updateWithRetry("w", null, _ -> Updates.set("name", "b"), "job",
-                    RetryPolicy.defaults()))
-                    .isInstanceOf(NotWrittenException.class);
+            ThrowingCallable systemRead = () -> viaFailing.updateWithRetry("w", null, _ -> Updates.set("name", "b"),
+                    "job", RetryPolicy.defaults());
+
+            // Code 9 (FailedToParse) is on the bad-filter list.
+            armFailPoint(app, "find", 1, new Document("errorCode", 9));
+            assertThatThrownBy(systemRead).isInstanceOf(IllegalArgumentException.class).cause()
+                    .isInstanceOfSatisfying(MongoServerException.class, e -> assertThat(e.getCode()).isEqualTo(9));
+            disarmFailPoint();
+
+            // An error label means that the server did not just reject the filter: transient.
+            armFailPoint(app, "find", 1, new Document("errorCode", 2).append("errorLabels", List.of("SomeLabel")));
+            assertThatThrownBy(systemRead).isInstanceOf(NotWrittenException.class);
+            disarmFailPoint();
+
+            // A code that is not on the list stays transient: ShutdownInProgress (91), twice, so that the driver's
+            // read retry fails too.
+            armFailPoint(app, "find", 2, new Document("errorCode", 91));
+            assertThatThrownBy(systemRead).isInstanceOf(NotWrittenException.class);
+            disarmFailPoint();
+
+            // The rule is for reads only: code 2 as a command error on an update is not a bad filter.
+            armFailPoint(app, "update", 1, new Document("errorCode", 2));
+            assertThatThrownBy(() -> viaFailing.update("w", 1L, null, Updates.set("name", "b"), "bob"))
+                    .isInstanceOf(TransientDataAccessException.class);
+            disarmFailPoint();
         } finally {
-            client.getDatabase("admin")
-                    .runCommand(new Document("configureFailPoint", "failCommand").append("mode", "off"));
+            disarmFailPoint();
         }
         assertThat(stored()).isEqualTo(before);
+    }
+
+    private static void armFailPoint(String app, String command, int times, Document data) {
+        client.getDatabase("admin").runCommand(new Document("configureFailPoint", "failCommand")
+                .append("mode", new Document("times", times))
+                .append("data", data.append("failCommands", List.of(command)).append("appName", app)));
+    }
+
+    private static void disarmFailPoint() {
+        client.getDatabase("admin").runCommand(new Document("configureFailPoint", "failCommand").append("mode", "off"));
     }
 
     @Test
