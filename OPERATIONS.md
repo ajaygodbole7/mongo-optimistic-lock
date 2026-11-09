@@ -30,7 +30,7 @@ DESIGN.md section 2 records the decisions behind these defaults: the 10 s deadli
 connection capacity.
 
 The writer also pins `w: majority` and primary reads on its collection. The URI cannot change this. Thus, an
-acknowledged write stays after a failover, and the diagnosis read is always current.
+acknowledged write stays after a failover, and the diagnosis read sees the primary's latest state.
 
 ## Validator deployment
 

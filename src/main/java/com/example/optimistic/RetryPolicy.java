@@ -43,12 +43,18 @@ import java.time.Duration;
  */
 public record RetryPolicy(int maxAttempts, Duration baseDelay, Duration maxDelay) {
 
+    /** The longest delay. A wait is computed in nanoseconds, and a much longer one overflows. */
+    private static final Duration MAX_DELAY = Duration.ofDays(365);
+
     public RetryPolicy {
         if (maxAttempts < 1) {
             throw new IllegalArgumentException("maxAttempts must be >= 1");
         }
         if (baseDelay.isNegative() || maxDelay.isNegative()) {
             throw new IllegalArgumentException("delays must not be negative");
+        }
+        if (baseDelay.compareTo(MAX_DELAY) > 0 || maxDelay.compareTo(MAX_DELAY) > 0) {
+            throw new IllegalArgumentException("delays must not be longer than " + MAX_DELAY);
         }
     }
 

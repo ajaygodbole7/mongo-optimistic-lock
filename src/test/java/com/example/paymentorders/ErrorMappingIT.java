@@ -277,6 +277,19 @@ class ErrorMappingIT {
         assertThat(version()).isEqualTo(1L);
     }
 
+    /** E22: the label NoWritesPerformed means that the server wrote nothing. It is "not written", without a subtype. */
+    @Test
+    void e22_noWritesPerformedIsNotWritten() {
+        failUpdates(new Document("times", 1),
+                new Document("errorCode", 2).append("errorLabels", List.of("NoWritesPerformed")));
+
+        TransientDataAccessException e = transientFailure(
+                () -> service("").amend(id, 1L, remittance("e22"), "bob"));
+
+        assertThat(e).isExactlyInstanceOf(NotWrittenException.class);
+        assertThat(version()).isEqualTo(1L);
+    }
+
     /** E11: after a failed retry, "not primary" can hide a first attempt that applied. For an insert, say unknown. */
     @Test
     void e11_insertRejectedByNonPrimaryMayHaveBeenWritten() {

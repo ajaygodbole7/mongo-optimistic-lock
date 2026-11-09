@@ -91,9 +91,9 @@ public final class OptimisticLockingWriter<K> {
     /**
      * {@code clock} supplies the who-column timestamps. Tests give a fixed one. Majority writes and primary reads
      * are pinned. The client and the URI cannot change them. Thus, an acknowledged write stays after a failover,
-     * and the diagnosis read is current. Each document that the writer reads has its dates as {@link Instant}
-     * ({@link #withInstantDates}), whatever client built the collection. One exception: a date inside an array
-     * decodes as {@code java.util.Date}, because the driver's list decoding does not use this setting.
+     * and the diagnosis read sees the primary's latest state. Each document that the writer reads has its dates as
+     * {@link Instant} ({@link #withInstantDates}), whatever client built the collection. One exception: a date inside
+     * an array decodes as {@code java.util.Date}, because the driver's list decoding does not use this setting.
      */
     public OptimisticLockingWriter(MongoCollection<Document> collection, InstantSource clock) {
         this.collection = collection
@@ -150,13 +150,13 @@ public final class OptimisticLockingWriter<K> {
 
     /** Does the versioned updateOne. Returns true if it matched. It does not do the diagnosis read. */
     private boolean tryUpdate(K id, long expectedVersion, Bson precondition, Bson changes, String user) {
-        rejectSystemFields(changes);
+        BsonDocument checked = checkedChanges(changes); // sent as checked: the caller's Bson is rendered once
         Bson filter = and(filter(id, precondition), eq(VERSION, expectedVersion));
         // The caller's changes come last: combine merges into the first operator document, so it changes ours.
         Bson update = Updates.combine(
                 WhoColumns.onUpdate(clock.instant(), user),
                 Updates.inc(VERSION, 1L),
-                changes);
+                checked);
         return call(id, Kind.UPDATE, () -> collection.updateOne(filter, update)).getMatchedCount() == 1;
     }
 
@@ -256,8 +256,11 @@ public final class OptimisticLockingWriter<K> {
         return precondition == null ? eq("_id", id) : and(eq("_id", id), precondition);
     }
 
-    /** Rejects a change with an operator outside the allow-list, or with a path that starts with a system field. */
-    private void rejectSystemFields(Bson changes) {
+    /**
+     * Renders {@code changes} once, and rejects an operator outside the allow-list, an operator value that is not a
+     * document, or a path that starts with a system field. Returns the rendering that it checked.
+     */
+    private BsonDocument checkedChanges(Bson changes) {
         if (changes == null) {
             throw new IllegalArgumentException("changes must not be null");
         }
@@ -271,14 +274,16 @@ public final class OptimisticLockingWriter<K> {
             if (!ALLOWED_OPERATORS.contains(operator.getKey())) {
                 throw new IllegalArgumentException("Update operator not allowed: " + operator.getKey());
             }
-            if (operator.getValue() instanceof BsonDocument fields) {
-                for (String path : fields.keySet()) {
-                    if (SYSTEM_FIELDS.contains(path.split("\\.", 2)[0])) {
-                        throw new IllegalArgumentException("System field not changeable: " + path);
-                    }
+            if (!(operator.getValue() instanceof BsonDocument fields)) {
+                throw new IllegalArgumentException("Update operator value is not a document: " + operator.getKey());
+            }
+            for (String path : fields.keySet()) {
+                if (SYSTEM_FIELDS.contains(path.split("\\.", 2)[0])) {
+                    throw new IllegalArgumentException("System field not changeable: " + path);
                 }
             }
         }
+        return rendered;
     }
 
     /**

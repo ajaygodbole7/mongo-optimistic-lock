@@ -24,7 +24,9 @@ import java.util.Date;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
+import org.bson.BsonDocument;
 import org.bson.Document;
+import org.bson.codecs.configuration.CodecRegistry;
 import org.bson.conversions.Bson;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -193,6 +195,10 @@ class WriterEdgeCasesIT {
         Document before = stored();
         assertThatThrownBy(() -> writer.update("w", 1L, null, null, "bob"))
                 .isInstanceOf(IllegalArgumentException.class);
+        for (Bson notADocument : List.of(new Document("$set", 5), new Document("$inc", 5))) {
+            assertThatThrownBy(() -> writer.update("w", 1L, null, notADocument, "bob"))
+                    .as("%s", notADocument).isInstanceOf(IllegalArgumentException.class);
+        }
         for (long expected : new long[] {0L, -1L}) {
             assertThatThrownBy(() -> writer.update("w", expected, null, Updates.set("name", "b"), "bob"))
                     .isInstanceOf(VersionConflictException.class);
@@ -208,6 +214,21 @@ class WriterEdgeCasesIT {
         }, "job", RetryPolicy.defaults())).isInstanceOf(IllegalArgumentException.class);
         assertThat(calls).hasValue(1);
         assertThat(stored()).isEqualTo(before);
+
+        // A change that renders differently the second time: the writer sends the rendering that it checked.
+        AtomicInteger renders = new AtomicInteger();
+        Bson shifty = new Bson() {
+            @Override
+            public <T> BsonDocument toBsonDocument(Class<T> documentClass, CodecRegistry codecRegistry) {
+                return renders.incrementAndGet() == 1
+                        ? Updates.set("name", "b").toBsonDocument(documentClass, codecRegistry)
+                        : Updates.set(WhoColumns.CREATED_BY, "eve").toBsonDocument(documentClass, codecRegistry);
+            }
+        };
+        assertThat(writer.update("w", 1L, null, shifty, "bob")).isEqualTo(2L);
+        assertThat(renders).hasValue(1);
+        assertThat(stored().getString("name")).isEqualTo("b");
+        assertThat(stored().getString(WhoColumns.CREATED_BY)).isNull(); // insertRaw sets no who-columns
 
         assertThatThrownBy(() -> new RetryPolicy(3, null, Duration.ZERO)).isInstanceOf(NullPointerException.class);
         assertThatThrownBy(() -> new OptimisticLockingWriter<String>(null)).isInstanceOf(NullPointerException.class);

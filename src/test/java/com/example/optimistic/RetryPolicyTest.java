@@ -35,5 +35,12 @@ class RetryPolicyTest {
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new RetryPolicy(8, Duration.ofMillis(5), Duration.ofMillis(-1)))
                 .isInstanceOf(IllegalArgumentException.class);
+        // Longer than 365 days: the wait in nanoseconds would overflow (Long.MAX_VALUE nanoseconds is about 292 years).
+        assertThatThrownBy(() -> new RetryPolicy(8, Duration.ofMillis(5), Duration.ofNanos(Long.MAX_VALUE)))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new RetryPolicy(8, Duration.ofDays(366), Duration.ofDays(365)))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThat(new RetryPolicy(8, Duration.ofDays(365), Duration.ofDays(365)).maxSleep(30))
+                .isEqualTo(Duration.ofDays(365));
     }
 }
