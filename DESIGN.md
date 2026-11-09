@@ -135,6 +135,9 @@ the facade throws.
 
 ## 4. System retries
 
+**Future scope.** System jobs are not part of the current scope. `updateWithRetry` and its tests stay as a sketch, with
+one known limit (below). Fix the limit before a system job uses it in production.
+
 The writer never retries a user write: a conflict goes back to the caller, which decides (CONFLICTS.md).
 
 System read-modify-write uses
@@ -144,8 +147,7 @@ System read-modify-write uses
   If the order does not exist, or its status is not allowed, the method throws immediately, before `recompute`.
 - Then it calls `recompute(doc)` to build the change. If `recompute` returns `null`, there is nothing to change. The
   method returns the version that it read, and does not write (T28). It does not confirm the version with a majority
-  read: on a hot document the majority read lags, and the lag would count as a conflict. If a failover rolls the
-  version back, the next versioned write gets a conflict, which is the pattern doing its job.
+  read: on a hot document the majority read lags, and the lag would count as a conflict.
 - Then it does the versioned `updateOne` with the version that it read. A failed attempt does not do the diagnosis
   read, because the next attempt's read gives the same information. Only the last attempt does it (T29).
 - **On `VersionConflictException`:** wait for a random time between 0 and `min(maxDelay, baseDelay × 2^(attempt − 1))`
@@ -165,6 +167,18 @@ System read-modify-write uses
   the gate uses a `ReentrantLock`). But `maxPoolSize` and latency limit throughput, not the number of threads. With
   virtual threads, put a semaphore sized to the pool in front of the service. If not, thousands of calls queue for a
   connection, and each one that times out is a `WriteTimeoutException`.
+
+**Known limit: a rollback can reuse a version number.** The read in each attempt uses the default (local) read
+concern. Thus, it can return a write that is not yet majority-committed:
+1. Pod A writes v4 on the primary. A majority has not confirmed it.
+2. A system job reads v4 and calculates its change from it.
+3. The primary fails, and v4 is rolled back. Pod B writes a different v4 on the new primary, confirmed by a majority.
+4. The job's update for version 4 matches B's v4 and overwrites it. No conflict occurs.
+
+The same window lets a `recompute` that returns `null` report a version that never committed. User writes are not
+affected: they reload with `ReadConcern.MAJORITY`. The fix is a majority read in `updateWithRetry`, with more
+conflicts on hot documents (SPEC section 2 must change first). The single-node replica set in the tests cannot roll
+back, so no test shows this case.
 
 ## 5. Data model and validation
 
@@ -389,5 +403,6 @@ service job  ──► its own service-account id                 ──► serv
 - **Idempotency key for `create`.** Orders come from a UI that saves once and then updates with the version check.
   A repeated Save after a timeout can make a second draft, which can be cancelled before submit. If this changes,
   the small fix is a client-supplied `_id`: MongoDB rejects the duplicate.
+- **System jobs (`updateWithRetry`):** future scope. Fix the known limit in section 4 before production use.
 - **An `Actor` type for `user`:** `Actor(String id, Kind kind)`, built only by the API layer, so that a caller cannot
   pass a plain string by mistake.
