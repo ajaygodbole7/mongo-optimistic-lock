@@ -296,11 +296,11 @@ The test IDs (T1, E3, S1, G1, ...) are the same as in the tables in SPEC.md (sec
 | `OptimisticLockingWriterIT` | The generic writer alone, on a plain `widgets` collection with string ids (G1–G10) |
 | `WriterEdgeCasesIT` | Edge cases of the generic writer: bad input, version types, extreme dates (G12–G19) |
 | `RetryPolicyTest` | The retry wait limits (G11), unit test |
-| `OptimisticLockingIT` | Each operation and rule on one client: create, amend, conflicts, status rules, validator, who-columns, dates |
+| `OptimisticLockingIT` | Each operation and rule on one client: create, amend, conflicts, status rules, validator updates, who-columns, dates |
 | `ShutdownIT` | Graceful shutdown: calls in progress finish, later calls are refused, the client closes once (S1–S4) |
 | `ConcurrencyIT` | Races between simulated pods, one `MongoClient` each: exactly one winner (T8, T9, T13) and no lost updates (T10, T14) |
 | `ErrorMappingIT` | Driver failures become the correct exception. It uses MongoDB **fail points** |
-| `ValidationSyncIT` | The Java checks and the MongoDB validator require the same fields |
+| `ValidationSyncIT` | The Java checks and the MongoDB validator require the same fields (T24). The validator rejects a raw insert that bypasses the service (T11) |
 | `PaymentOrderChecksTest`, `PaymentOrderClientsTest` | Unit tests, no database |
 | `StressIT` | The load test (profile `stress` only) |
 | `AtlasSmokeIT` | A smoke test against a real cluster (profile `atlas` only). Not run yet |

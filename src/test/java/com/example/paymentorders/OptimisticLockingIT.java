@@ -1,7 +1,10 @@
 package com.example.paymentorders;
 
+import static com.example.paymentorders.MongoTestSupport.DOCUMENT_VALIDATION_FAILURE;
+import static com.example.paymentorders.MongoTestSupport.assertRejectedByValidator;
 import static com.example.paymentorders.MongoTestSupport.collection;
 import static com.example.paymentorders.MongoTestSupport.sampleOrder;
+import static com.example.paymentorders.MongoTestSupport.validRawOrder;
 import static com.mongodb.client.model.Filters.eq;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -440,7 +443,7 @@ class OptimisticLockingIT {
         PaymentOrderSchema.apply(MongoTestSupport.database(client));
         assertThatThrownBy(() -> service.amend(id, 2L, remittance("strict"), "bob")).as("strict: old document")
                 .isInstanceOfSatisfying(OrderValidationException.class, OptimisticLockingIT::assertRejectedByServer);
-        assertRejectedByValidator(validRawOrder().append("currency", "usd"));
+        assertRejectedByValidator(client, validRawOrder().append("currency", "usd"));
         assertThat(service.amend(id, 2L, Map.of("currency", "EUR"), "bob")).as("a fix of the old document").isEqualTo(3L);
     }
 
@@ -496,74 +499,12 @@ class OptimisticLockingIT {
         assertThat(load(id)).isEqualTo(before);
     }
 
-    /** A raw document that passes the validator. */
-    private static Document validRawOrder() {
-        Instant now = CREATED_MS;
-        return new Document("status", "DRAFT")
-                .append("debtor", new Document("account", "ACC-0001"))
-                .append("creditor", new Document("name", "Acme Ltd").append("iban", "DE89370400440532013000")
-                        .append("address", new Document("country", "DE")))
-                .append("amount", new Decimal128(new BigDecimal("1.00")))
-                .append("currency", "EUR")
-                .append("_documentMeta", new Document("version", 1L))
-                .append("_createdDate", now)
-                .append("_createdBy", "alice")
-                .append("_lastModifiedDate", now)
-                .append("_lastModifiedBy", "alice");
-    }
-
     /** The MongoDB validator, not the service, rejected the write. */
     static void assertRejectedByServer(OrderValidationException e) {
         assertThat(e.errors()).isEmpty();
         assertThat(e.reason()).isEqualTo(SchemaValidationException.Reason.REJECTED_BY_VALIDATOR);
         assertThat(e).hasMessageContaining("was rejected by the validator");
         assertThat(e.getCause()).isInstanceOfSatisfying(MongoWriteException.class,
-                cause -> assertThat(cause.getCode()).isEqualTo(121));
-    }
-
-    private void assertRejectedByValidator(Document doc) {
-        assertThatThrownBy(() -> collection(client).insertOne(doc))
-                .isInstanceOfSatisfying(MongoWriteException.class, e -> assertThat(e.getCode()).isEqualTo(121));
-    }
-
-    @Test
-    void t11_validatorAcceptsValidRawOrder() {
-        collection(client).insertOne(validRawOrder());
-        assertThat(collection(client).countDocuments()).isEqualTo(1);
-    }
-
-    @Test
-    void t11_validatorRejectsMissingCreatedBy() {
-        Document doc = validRawOrder();
-        doc.remove("_createdBy");
-        assertRejectedByValidator(doc);
-    }
-
-    @Test
-    void t11d_validatorRejectsEmptyCreatedBy() {
-        assertRejectedByValidator(validRawOrder().append("_createdBy", ""));
-    }
-
-    @Test
-    void t11_validatorRejectsExtraMetaField() {
-        assertRejectedByValidator(validRawOrder()
-                .append("_documentMeta", new Document("version", 1L).append("lockedBy", "pod-1")));
-    }
-
-    @Test
-    void t11c_validatorRejectsExtraAddressField() {
-        Document doc = validRawOrder();
-        doc.getEmbedded(List.of("creditor", "address"), Document.class).append("planet", "Earth");
-        assertRejectedByValidator(doc);
-    }
-
-    @Test
-    void t11e_validatorRejectsZeroAmount() {
-        assertRejectedByValidator(validRawOrder().append("amount", new Decimal128(BigDecimal.ZERO)));
-    }
-
-    @Test
-    void t11c_validatorRejectsUnknownStatus() {
-        assertRejectedByValidator(validRawOrder().append("status", "PAID"));
+                cause -> assertThat(cause.getCode()).isEqualTo(DOCUMENT_VALIDATION_FAILURE));
     }
 }

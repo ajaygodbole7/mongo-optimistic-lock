@@ -1,5 +1,8 @@
 package com.example.optimistic;
 
+import static com.example.paymentorders.MongoTestSupport.BAD_VALUE;
+import static com.example.paymentorders.MongoTestSupport.FAILED_TO_PARSE;
+import static com.example.paymentorders.MongoTestSupport.SHUTDOWN_IN_PROGRESS;
 import static com.mongodb.client.model.Filters.eq;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -244,7 +247,8 @@ class WriterEdgeCasesIT {
             return Updates.set("name", "b");
         }, "job", RetryPolicy.defaults()))
                 .isInstanceOf(IllegalArgumentException.class)
-                .cause().isInstanceOfSatisfying(MongoServerException.class, e -> assertThat(e.getCode()).isEqualTo(2));
+                .cause().isInstanceOfSatisfying(MongoServerException.class,
+                        e -> assertThat(e.getCode()).isEqualTo(BAD_VALUE));
         assertThat(calls).hasValue(0);
         assertThat(stored()).isEqualTo(before);
 
@@ -258,25 +262,27 @@ class WriterEdgeCasesIT {
                     "job", RetryPolicy.defaults());
 
             // Code 9 (FailedToParse) is on the bad-filter list.
-            armFailPoint(app, "find", 1, new Document("errorCode", 9));
+            armFailPoint(app, "find", 1, new Document("errorCode", FAILED_TO_PARSE));
             assertThatThrownBy(systemRead).isInstanceOf(IllegalArgumentException.class).cause()
-                    .isInstanceOfSatisfying(MongoServerException.class, e -> assertThat(e.getCode()).isEqualTo(9));
+                    .isInstanceOfSatisfying(MongoServerException.class,
+                            e -> assertThat(e.getCode()).isEqualTo(FAILED_TO_PARSE));
             disarmFailPoint();
 
             // An error label means that the server did not just reject the filter: transient.
-            armFailPoint(app, "find", 1, new Document("errorCode", 2).append("errorLabels", List.of("SomeLabel")));
+            armFailPoint(app, "find", 1,
+                    new Document("errorCode", BAD_VALUE).append("errorLabels", List.of("SomeLabel")));
             assertThatThrownBy(systemRead).isInstanceOf(NotWrittenException.class);
             disarmFailPoint();
 
             // A code that is not on the list stays transient: ShutdownInProgress (91), twice, so that the driver's
             // read retry fails too.
-            armFailPoint(app, "find", 2, new Document("errorCode", 91));
+            armFailPoint(app, "find", 2, new Document("errorCode", SHUTDOWN_IN_PROGRESS));
             assertThatThrownBy(systemRead).isInstanceOf(NotWrittenException.class);
             disarmFailPoint();
 
             // The rule is for reads only: code 2 as a command error on an update is not a bad filter. The caller cannot
             // tell the first attempt from the driver's retry, so it is the general "maybe written" type.
-            armFailPoint(app, "update", 1, new Document("errorCode", 2));
+            armFailPoint(app, "update", 1, new Document("errorCode", BAD_VALUE));
             assertThatThrownBy(() -> viaFailing.update("w", 1L, null, Updates.set("name", "b"), "bob"))
                     .isExactlyInstanceOf(MaybeWrittenException.class);
             disarmFailPoint();

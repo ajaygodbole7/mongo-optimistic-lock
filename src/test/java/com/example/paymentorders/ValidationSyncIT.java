@@ -1,27 +1,35 @@
 package com.example.paymentorders;
 
+import static com.example.paymentorders.MongoTestSupport.assertRejectedByValidator;
 import static com.example.paymentorders.MongoTestSupport.collection;
 import static com.example.paymentorders.MongoTestSupport.sampleOrder;
+import static com.example.paymentorders.MongoTestSupport.validRawOrder;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.paymentorders.exception.OrderValidationException;
 import com.mongodb.client.MongoClient;
+import java.math.BigDecimal;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import org.bson.Document;
+import org.bson.types.Decimal128;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * Keeps the two validation layers the same: the service's checks ({@link PaymentOrderChecks}) and the MongoDB
- * validator ({@link PaymentOrderSchema}). If one layer adds or removes a required field and the other does not, this
- * test fails.
+ * The two validation layers: the service's checks ({@link PaymentOrderChecks}) and the MongoDB validator
+ * ({@link PaymentOrderSchema}).
+ * <ul>
+ *   <li>T24: they stay the same. If one layer adds or removes a required field and the other does not, a test
+ *       fails.</li>
+ *   <li>T11: the validator rejects a raw insert that bypasses the service.</li>
+ * </ul>
  */
 class ValidationSyncIT {
 
@@ -163,5 +171,46 @@ class ValidationSyncIT {
 
     private static NewPaymentOrder withCreditor(NewPaymentOrder o, NewPaymentOrder.Creditor creditor) {
         return new NewPaymentOrder(o.debtor(), creditor, o.amount(), o.currency(), o.remittance());
+    }
+
+    @Test
+    void t11_validatorAcceptsValidRawOrder() {
+        collection(client).insertOne(validRawOrder());
+        assertThat(collection(client).countDocuments()).isEqualTo(1);
+    }
+
+    @Test
+    void t11_validatorRejectsMissingCreatedBy() {
+        Document doc = validRawOrder();
+        doc.remove("_createdBy");
+        assertRejectedByValidator(client, doc);
+    }
+
+    @Test
+    void t11d_validatorRejectsEmptyCreatedBy() {
+        assertRejectedByValidator(client, validRawOrder().append("_createdBy", ""));
+    }
+
+    @Test
+    void t11_validatorRejectsExtraMetaField() {
+        assertRejectedByValidator(client, validRawOrder()
+                .append("_documentMeta", new Document("version", 1L).append("lockedBy", "pod-1")));
+    }
+
+    @Test
+    void t11c_validatorRejectsExtraAddressField() {
+        Document doc = validRawOrder();
+        doc.getEmbedded(List.of("creditor", "address"), Document.class).append("planet", "Earth");
+        assertRejectedByValidator(client, doc);
+    }
+
+    @Test
+    void t11e_validatorRejectsZeroAmount() {
+        assertRejectedByValidator(client, validRawOrder().append("amount", new Decimal128(BigDecimal.ZERO)));
+    }
+
+    @Test
+    void t11c_validatorRejectsUnknownStatus() {
+        assertRejectedByValidator(client, validRawOrder().append("status", "PAID"));
     }
 }

@@ -1,10 +1,15 @@
 package com.example.paymentorders;
 
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import com.mongodb.MongoWriteException;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.Updates;
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.concurrent.Executor;
 import org.bson.Document;
 import org.bson.conversions.Bson;
@@ -32,6 +37,14 @@ public final class MongoTestSupport {
      * pool.
      */
     public static final Executor VIRTUAL_THREADS = task -> Thread.ofVirtual().start(task);
+
+    // Server error codes that the tests make with the failCommand fail point, or expect from the server.
+    public static final int BAD_VALUE = 2;
+    public static final int FAILED_TO_PARSE = 9;
+    static final int UNAUTHORIZED = 13;
+    public static final int SHUTDOWN_IN_PROGRESS = 91;
+    static final int DOCUMENT_VALIDATION_FAILURE = 121;
+    static final int NOT_WRITABLE_PRIMARY = 10107; // what a primary that stepped down returns
 
     static {
         if (EXTERNAL) {
@@ -124,5 +137,27 @@ public final class MongoTestSupport {
                 new BigDecimal("1250.00"),
                 "EUR",
                 new NewPaymentOrder.Remittance("INV-4471", "Invoice 4471"));
+    }
+
+    /** A raw document that passes the validator. */
+    static Document validRawOrder() {
+        Instant now = Instant.parse("2026-11-02T08:00:00.123Z");
+        return new Document("status", "DRAFT")
+                .append("debtor", new Document("account", "ACC-0001"))
+                .append("creditor", new Document("name", "Acme Ltd").append("iban", "DE89370400440532013000")
+                        .append("address", new Document("country", "DE")))
+                .append("amount", new Decimal128(new BigDecimal("1.00")))
+                .append("currency", "EUR")
+                .append("_documentMeta", new Document("version", 1L))
+                .append("_createdDate", now)
+                .append("_createdBy", "alice")
+                .append("_lastModifiedDate", now)
+                .append("_lastModifiedBy", "alice");
+    }
+
+    /** A raw insert of {@code doc}, past the service, is rejected by the MongoDB validator. */
+    static void assertRejectedByValidator(MongoClient client, Document doc) {
+        assertThatThrownBy(() -> collection(client).insertOne(doc)).isInstanceOfSatisfying(MongoWriteException.class,
+                e -> assertThat(e.getCode()).isEqualTo(DOCUMENT_VALIDATION_FAILURE));
     }
 }

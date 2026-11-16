@@ -1,6 +1,10 @@
 package com.example.paymentorders;
 
 import static com.example.optimistic.exception.SchemaValidationException.Reason.TOO_LARGE;
+import static com.example.paymentorders.MongoTestSupport.BAD_VALUE;
+import static com.example.paymentorders.MongoTestSupport.NOT_WRITABLE_PRIMARY;
+import static com.example.paymentorders.MongoTestSupport.SHUTDOWN_IN_PROGRESS;
+import static com.example.paymentorders.MongoTestSupport.UNAUTHORIZED;
 import static com.example.paymentorders.MongoTestSupport.collection;
 import static com.example.paymentorders.MongoTestSupport.database;
 import static com.example.paymentorders.MongoTestSupport.sampleOrder;
@@ -145,7 +149,7 @@ class ErrorMappingIT {
 
     @Test
     void e2_singleElectionErrorIsRetriedByTheDriver() {
-        failUpdates(new Document("times", 1), new Document("errorCode", 10107));
+        failUpdates(new Document("times", 1), new Document("errorCode", NOT_WRITABLE_PRIMARY));
 
         assertThat(service("").amend(id, 1L, remittance("e2"), "bob")).isEqualTo(2L);
         assertThat(version()).isEqualTo(2L);
@@ -153,7 +157,7 @@ class ErrorMappingIT {
 
     @Test
     void e3_rejectedRetryMayHaveBeenWritten() {
-        failUpdates(new Document("times", 2), new Document("errorCode", 10107));
+        failUpdates(new Document("times", 2), new Document("errorCode", NOT_WRITABLE_PRIMARY));
 
         TransientDataAccessException e = transientFailure(() -> service(ONE_RETRY).amend(id, 1L, remittance("e3"), "bob"));
 
@@ -219,7 +223,8 @@ class ErrorMappingIT {
     @Test
     void e8_writeConcernErrorMayHaveBeenWrittenAndWas() {
         failUpdates(new Document("times", 2), new Document("writeConcernError",
-                new Document("code", 91).append("codeName", "ShutdownInProgress").append("errmsg", "shutting down")));
+                new Document("code", SHUTDOWN_IN_PROGRESS).append("codeName", "ShutdownInProgress")
+                        .append("errmsg", "shutting down")));
 
         TransientDataAccessException e = transientFailure(() -> service("").amend(id, 1L, remittance("e8"), "bob"));
 
@@ -281,7 +286,7 @@ class ErrorMappingIT {
     @Test
     void e22_noWritesPerformedIsNotWritten() {
         failUpdates(new Document("times", 1),
-                new Document("errorCode", 2).append("errorLabels", List.of("NoWritesPerformed")));
+                new Document("errorCode", BAD_VALUE).append("errorLabels", List.of("NoWritesPerformed")));
 
         TransientDataAccessException e = transientFailure(
                 () -> service("").amend(id, 1L, remittance("e22"), "bob"));
@@ -293,7 +298,7 @@ class ErrorMappingIT {
     /** E11: after a failed retry, "not primary" can hide a first attempt that applied. For an insert, say unknown. */
     @Test
     void e11_insertRejectedByNonPrimaryMayHaveBeenWritten() {
-        failCommands(List.of("insert"), new Document("times", 2), new Document("errorCode", 10107));
+        failCommands(List.of("insert"), new Document("times", 2), new Document("errorCode", NOT_WRITABLE_PRIMARY));
 
         TransientDataAccessException e = transientFailure(() -> service(ONE_RETRY).create(sampleOrder(), "bob"));
 
@@ -420,7 +425,7 @@ class ErrorMappingIT {
     /** E16: with the default timeoutMS, the driver retries until the deadline. Thus, the E3 failure has no effect. */
     @Test
     void e16_defaultTimeoutRidesOutRepeatedElectionErrors() {
-        failUpdates(new Document("times", 2), new Document("errorCode", 10107));
+        failUpdates(new Document("times", 2), new Document("errorCode", NOT_WRITABLE_PRIMARY));
 
         assertThat(service("").amend(id, 1L, remittance("e16"), "bob")).isEqualTo(2L);
         assertThat(version()).isEqualTo(2L);
@@ -444,7 +449,7 @@ class ErrorMappingIT {
     /** E18: code 13 (Unauthorized) is not transient. A retry cannot correct it. */
     @Test
     void e18_unauthorizedIsNotAuthorisedMongoException() {
-        failUpdates(new Document("times", 1), new Document("errorCode", 13));
+        failUpdates(new Document("times", 1), new Document("errorCode", UNAUTHORIZED));
 
         DataAccessException e = ourException(() -> service("").amend(id, 1L, remittance("e18"), "bob"));
 
@@ -457,7 +462,8 @@ class ErrorMappingIT {
     @Test
     void e19_writeConcernErrorWithCode13MayHaveBeenWritten() {
         failUpdates(new Document("times", 1), new Document("writeConcernError",
-                new Document("code", 13).append("codeName", "Unauthorized").append("errmsg", "not authorized")));
+                new Document("code", UNAUTHORIZED).append("codeName", "Unauthorized")
+                        .append("errmsg", "not authorized")));
 
         TransientDataAccessException e = transientFailure(() -> service("").amend(id, 1L, remittance("e19"), "bob"));
 
@@ -469,7 +475,7 @@ class ErrorMappingIT {
     /** E20: the server sheds load (SystemOverloadedError), and the driver already retried. An attempt can have applied. */
     @Test
     void e20_systemOverloadedMayHaveBeenWritten() {
-        failUpdates(new Document("times", 20), new Document("errorCode", 2).append("errorLabels",
+        failUpdates(new Document("times", 20), new Document("errorCode", BAD_VALUE).append("errorLabels",
                 List.of(MongoException.SYSTEM_OVERLOADED_ERROR_LABEL, MongoException.RETRYABLE_ERROR_LABEL)));
 
         TransientDataAccessException e = transientFailure(
