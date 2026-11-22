@@ -31,7 +31,7 @@ import org.bson.types.ObjectId;
  *       {@link InvalidStatusException} and {@link OrderValidationException}. All other exceptions pass through.</li>
  * </ul>
  */
-public final class PaymentOptimisticWriter {
+final class PaymentOptimisticWriter {
 
     private final OptimisticLockingWriter<ObjectId> writer;
 

@@ -26,7 +26,7 @@ who-columns. The who-columns record the last writer, not a history. The version 
 pod's clock and are for people.
 
 **Generic writer and facade.** The locking mechanism (`com.example.optimistic`) has no payment-order types. Thus, other
-collections can use it, and its tests (G1–G21) check it without the payment-order code. The facade
+collections can use it, and its tests (G1–G21) check it without the payment-order code. The package-private facade
 `PaymentOptimisticWriter` adds only three items: it makes the `ObjectId`, it gives the status rule as the precondition
 filter, and it changes three generic exceptions to their domain subclasses (`OrderNotFoundException`,
 `InvalidStatusException`, `OrderValidationException`). The domain exceptions extend the generic ones. Thus, a caller can

@@ -66,7 +66,8 @@ long v3 = widgets.updateWithRetry("w-1", null,                     // null: no p
   `PreconditionFailedException` with the current document.
 - **A facade per collection** holds the domain rules. `PaymentOptimisticWriter` is the example: it makes the ids,
   gives the status set as the precondition, and catches three generic exceptions to throw payment-order exceptions.
-  A different collection writes its own facade, and handles the generic exceptions in its own way.
+  A different collection writes its own facade, and handles the generic exceptions in its own way. Keep the facade
+  package-private: callers use the domain service, not the facade.
 
 ## 3. Does the pattern fit your collection?
 

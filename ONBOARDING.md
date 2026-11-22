@@ -178,6 +178,7 @@ The classes, and when you change them:
 **`PaymentOptimisticWriter`**
 
 - The facade over the generic writer.
+- It is package-private: callers use `PaymentOrderService` and handle exceptions.
 - It makes the `ObjectId`.
 - It turns the allowed statuses into the precondition filter.
 - It throws the domain exceptions.
