@@ -123,9 +123,12 @@ The who-columns are the writer's second job.
 - **Spring Data MongoDB covers the basic case of both jobs:** `@Version` for optimistic locking, and `@CreatedBy`,
   `@CreatedDate`, `@LastModifiedBy` and `@LastModifiedDate` for the who-columns.
 - **If you already use Spring Data,** these annotations are sufficient for the basic case.
-- **This repository uses the plain MongoDB Java driver,** and adds what the annotations do not give you on their own:
-  the one-read diagnosis, the not-written / maybe-written split, pinned durability, protected system fields and
-  system retries.
+- **This repository uses the plain MongoDB Java driver.** It adds two things that Spring Data does not do for you:
+  - **It tells the caller why a save failed, and whether it may have been written.** Spring's versioned `save`
+    throws one `OptimisticLockingFailureException` for a missing document and for a conflict. A failure that may
+    have been written has no exception of its own: a write-concern error becomes `DataIntegrityViolationException`.
+  - **It checks the version on every partial update, and writes only the changed fields.** Spring's `updateFirst`
+    and `findAndModify` increment the version, but do not put it in the filter.
 
 ## Stack
 
