@@ -137,7 +137,7 @@ class OptimisticLockingIT {
 
         Document after = load(id);
         assertThat(version).isEqualTo(2L);
-        assertThat(OptimisticLockingWriter.readVersion(after)).isEqualTo(2L);
+        assertThat(MongoTestSupport.version(after)).isEqualTo(2L);
         assertThat(after.get("amount")).isEqualTo(new Decimal128(new BigDecimal("99.95")));
         assertThat(after.getEmbedded(List.of("remittance", "unstructured"), String.class)).isEqualTo("Invoice 4472");
         assertThat(after.get("_createdDate", Instant.class)).isEqualTo(CREATED_MS);
@@ -169,7 +169,7 @@ class OptimisticLockingIT {
         assertThatThrownBy(() -> service.amend(id, version, remittance("late"), "bob"))
                 .isInstanceOfSatisfying(InvalidStatusException.class,
                         e -> assertThat(e.actualStatus()).isEqualTo("SUBMITTED"));
-        assertThat(OptimisticLockingWriter.readVersion(load(id))).isEqualTo(2L);
+        assertThat(MongoTestSupport.version(load(id))).isEqualTo(2L);
     }
 
     @Test
@@ -190,7 +190,7 @@ class OptimisticLockingIT {
 
         assertThatThrownBy(() -> service.submit(id, version, "alice"))
                 .isInstanceOf(InvalidStatusException.class);
-        assertThat(OptimisticLockingWriter.readVersion(load(id))).isEqualTo(2L);
+        assertThat(MongoTestSupport.version(load(id))).isEqualTo(2L);
     }
 
     @Test
@@ -223,7 +223,7 @@ class OptimisticLockingIT {
                     .as("changes %s", changes)
                     .isInstanceOf(IllegalArgumentException.class);
         }
-        assertThat(OptimisticLockingWriter.readVersion(load(id))).isEqualTo(1L);
+        assertThat(MongoTestSupport.version(load(id))).isEqualTo(1L);
     }
 
     @Test
@@ -279,7 +279,8 @@ class OptimisticLockingIT {
     void t19_insertRejectsSystemFields() {
         PaymentOptimisticWriter writer = new PaymentOptimisticWriter(collection(client));
 
-        for (String field : OptimisticLockingWriter.SYSTEM_FIELDS) {
+        for (String field : List.of("_id", "_documentMeta", "_documentMeta.version",
+                "_createdDate", "_createdBy", "_lastModifiedDate", "_lastModifiedBy")) {
             Document fields = new Document("status", "DRAFT").append(field, "x");
             assertThatThrownBy(() -> writer.insert(fields, "alice"))
                     .as(field)
@@ -303,7 +304,7 @@ class OptimisticLockingIT {
                 cancelled, Set.of(PaymentOrderStatus.DRAFT), recompute, "system", RetryPolicy.defaults()))
                 .isInstanceOf(InvalidStatusException.class);
         assertThat(recomputes).as("rejected before recompute, no retry").hasValue(0);
-        assertThat(OptimisticLockingWriter.readVersion(load(cancelled))).isEqualTo(2L);
+        assertThat(MongoTestSupport.version(load(cancelled))).isEqualTo(2L);
 
         recomputes.set(0);
         assertThatThrownBy(() -> writer.updateWithRetry(
@@ -340,7 +341,7 @@ class OptimisticLockingIT {
             assertThatThrownBy(() -> writer.update(id, 1L, draft, change, "bob")).as("%s", change)
                     .isInstanceOf(IllegalArgumentException.class);
         }
-        assertThat(OptimisticLockingWriter.readVersion(load(id))).isEqualTo(1L);
+        assertThat(MongoTestSupport.version(load(id))).isEqualTo(1L);
         assertThat(load(id).getString("_createdBy")).isEqualTo("alice");
     }
 
@@ -350,7 +351,7 @@ class OptimisticLockingIT {
         laterService.amend(id, 1L, remittance("edit"), "bob");
 
         Document order = service.get(id).orElseThrow();
-        assertThat(OptimisticLockingWriter.readVersion(order)).isEqualTo(2L);
+        assertThat(MongoTestSupport.version(order)).isEqualTo(2L);
         assertThat(order.getEmbedded(List.of("remittance", "unstructured"), String.class)).isEqualTo("edit");
         assertThat(service.get(new ObjectId())).isEmpty();
     }
@@ -374,7 +375,7 @@ class OptimisticLockingIT {
         Thread worker = new Thread(() -> {
             try {
                 writer.updateWithRetry(id, Set.of(PaymentOrderStatus.DRAFT), doc -> {
-                    laterService.amend(id, OptimisticLockingWriter.readVersion(doc),
+                    laterService.amend(id, MongoTestSupport.version(doc),
                             remittance("other writer " + recomputes.incrementAndGet()), "bob");
                     return MongoTestSupport.incrementAmount(doc);
                 }, "system", longWaits);
@@ -468,7 +469,7 @@ class OptimisticLockingIT {
 
             // Every attempt loses: another writer moves the version between the read and the update.
             assertThatThrownBy(() -> writer.updateWithRetry(id, Set.of(PaymentOrderStatus.DRAFT), doc -> {
-                laterService.amend(id, OptimisticLockingWriter.readVersion(doc), remittance("other"), "bob");
+                laterService.amend(id, MongoTestSupport.version(doc), remittance("other"), "bob");
                 return MongoTestSupport.incrementAmount(doc);
             }, "system", threeAttempts)).isInstanceOfSatisfying(RetriesExhaustedException.class, e -> {
                 assertThat(e.getCause()).isInstanceOf(VersionConflictException.class);
@@ -494,7 +495,8 @@ class OptimisticLockingIT {
         assertThatThrownBy(() -> service.amend(id, 1L, remittance("x"), "bob"))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("_documentMeta.version");
-        assertThatThrownBy(() -> OptimisticLockingWriter.readVersion(new Document("_documentMeta", new Document())))
+        assertThatThrownBy(() -> new OptimisticLockingWriter<>(collection(client))
+                .readVersion(new Document("_documentMeta", new Document())))
                 .isInstanceOf(IllegalStateException.class);
         assertThat(load(id)).isEqualTo(before);
     }

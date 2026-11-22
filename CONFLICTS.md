@@ -65,8 +65,8 @@ Never send the old change with the new version without the check:
 
 ```java
 catch (VersionConflictException e) {
-    long current = OptimisticLockingWriter.readVersion(orders.get(id).orElseThrow());
-    orders.amend(id, current, sameChangesAsBefore, user);   // WRONG: no check, so it writes over the other change
+    long current = writer.readVersion(writer.read(id));
+    writer.update(id, current, null, sameChangesAsBefore, user);  // WRONG: no check; it overwrites the other change
 }
 ```
 

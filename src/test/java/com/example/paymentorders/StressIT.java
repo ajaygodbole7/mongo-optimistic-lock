@@ -6,7 +6,6 @@ import static com.example.paymentorders.MongoTestSupport.sampleOrder;
 import static com.mongodb.client.model.Filters.eq;
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.example.optimistic.OptimisticLockingWriter;
 import com.example.optimistic.RetryPolicy;
 import com.example.optimistic.exception.RetriesExhaustedException;
 import com.example.optimistic.exception.MaybeWrittenException;
@@ -205,7 +204,7 @@ class StressIT {
                     stats.readFailures++;
                     continue;
                 }
-                long version = OptimisticLockingWriter.readVersion(current);
+                long version = MongoTestSupport.version(current);
                 BigDecimal next = MongoTestSupport.amountOf(current).add(BigDecimal.ONE);
                 long t0 = System.nanoTime();
                 try {
@@ -295,7 +294,7 @@ class StressIT {
             Document doc = collection(client).find(eq("_id", orders.get(i))).first();
 
             // Exact when nothing was "maybe written"; otherwise each such write may or may not have applied.
-            assertThat(OptimisticLockingWriter.readVersion(doc) - 1).as("order %d version", i)
+            assertThat(MongoTestSupport.version(doc) - 1).as("order %d version", i)
                     .isBetween(user + system, user + system + userUnknown + systemUnknown);
             // Both kinds of write add 1 to amount from the value that they read: a lost update loses an increment.
             BigDecimal applied = MongoTestSupport.amountOf(doc).subtract(new BigDecimal("1250.00"));

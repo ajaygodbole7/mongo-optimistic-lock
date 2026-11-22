@@ -78,8 +78,8 @@ class OptimisticLockingWriterIT {
         return widgets.find(eq("_id", id)).first();
     }
 
-    private static long version(Document doc) {
-        return OptimisticLockingWriter.readVersion(doc);
+    private long version(Document doc) {
+        return writer.readVersion(doc);
     }
 
     @Test

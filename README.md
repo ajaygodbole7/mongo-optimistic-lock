@@ -94,8 +94,8 @@ The who-columns are the writer's second job.
 - **The created pair** is never written after the insert.
 - **They record the last writer**, not a history.
 - **The version orders writes.** The dates come from the pod's clock and are for people.
-- **The writer owns six field names:** `_id`, `_documentMeta` and the four who-columns. It rejects a change or an
-  insert that names one of them.
+- **The writer owns its system fields:** `_id`, the version (default `_documentMeta.version`) and the four
+  who-columns. It rejects a change or an insert that names one of them.
 
 ## Features
 
@@ -115,7 +115,8 @@ The who-columns are the writer's second job.
   collection.
 - **System retries.** `updateWithRetry` calculates the change again from the fresh document, and retries a conflict
   with exponential backoff and full jitter. The writer never retries a user write.
-- **Generic.** Any `_id` type, and an optional precondition filter: a status rule, a guard or a shard key.
+- **Generic.** Any `_id` type, the version at a path that you choose (default `_documentMeta.version`), and an
+  optional precondition filter: a status rule, a guard or a shard key.
 
 ## Why not Spring Data's `@Version`?
 

@@ -53,10 +53,15 @@ long v3 = widgets.updateWithRetry("w-1", null,                     // null: no p
 - **`K`** is the type of `_id`. The caller makes the id before the insert. Thus, after a "maybe written" insert,
   the caller can look up the document. A second insert with the same id gives `DuplicateKeyException`, not a
   second document.
-- **Field names** are fixed: `_documentMeta.version` (`OptimisticLockingWriter.DOCUMENT_META`, `VERSION_FIELD`) and
-  the four who-columns (`WhoColumns.CREATED_DATE` and the others). A collection with other names copies the two
-  classes and changes the constants. A collection that does not want who-columns copies them and removes
-  `WhoColumns`.
+- **The version path** is `_documentMeta.version` by default. If your documents already keep a `long` version
+  somewhere else, give its path to the constructor, for example
+  `new OptimisticLockingWriter<>(collection, InstantSource.system(), "version")`. The writer then filters on,
+  increments and protects that path. Read the version with `writer.readVersion(doc)`.
+- **One version path per collection.** Every writer of the collection must use the same path. Two writers that check
+  different paths do not see each other's writes, and updates are lost.
+- **The who-columns** have fixed names (`WhoColumns.CREATED_DATE` and the others). A collection with other names
+  copies the two classes and changes the constants. A collection that does not want who-columns copies them and
+  removes `WhoColumns`.
 - **The precondition** is an extra filter, or `null`. After a zero match at the expected version, the writer reports
   `PreconditionFailedException` with the current document.
 - **A facade per collection** holds the domain rules. `PaymentOptimisticWriter` is the example: it makes the ids,
@@ -92,7 +97,8 @@ These parts are not in the generic package. Replace them for your collection:
 
 1. **Choose the id.** Prefer an id that the caller makes before the insert (`ObjectId`, UUID, or a natural key).
    Do not reuse the id of a deleted document (section 6, "ABA").
-2. **Add a version to existing documents** before the writer goes live. `readVersion` throws when the version is
+2. **Add a version to existing documents** before the writer goes live, at the writer's version path (the example
+   uses the default). `readVersion` throws when the version is
    missing. It does not use a default. Example:
    `updateMany({"_documentMeta.version": {$exists: false}}, {$set: {"_documentMeta.version": 1L}})`.
 3. **Find every writer of the collection.** This includes migrations, backfills (`updateMany`), edits in Compass or

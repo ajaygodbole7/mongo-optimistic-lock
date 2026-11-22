@@ -26,7 +26,7 @@ who-columns. The who-columns record the last writer, not a history. The version 
 pod's clock and are for people.
 
 **Generic writer and facade.** The locking mechanism (`com.example.optimistic`) has no payment-order types. Thus, other
-collections can use it, and its tests (G1–G19) check it without the payment-order code. The facade
+collections can use it, and its tests (G1–G21) check it without the payment-order code. The facade
 `PaymentOptimisticWriter` adds only three items: it makes the `ObjectId`, it gives the status rule as the precondition
 filter, and it changes three generic exceptions to their domain subclasses (`OrderNotFoundException`,
 `InvalidStatusException`, `OrderValidationException`). The domain exceptions extend the generic ones. Thus, a caller can
@@ -49,6 +49,7 @@ Keep these decisions when you change the code. Each one has a reason and a test 
 | The version filter and `$inc` of the version are in the same `updateOne` | It is atomic on one document. There is no window between a read and a write, and no lock. It is correct for any number of pods. | T8, T10 |
 | The caller supplies `expectedVersion` | If the writer read the version just before the write, the check would have no purpose. | T3 |
 | `readVersion` throws when the version is missing | There is no silent default. | T20 |
+| The caller can give the version path when it builds the writer | An existing collection keeps its version where it is, with no migration. The path is fixed for the life of the writer, and every writer of a collection uses the same path: two writers that check different paths lose updates. | G20, G21 |
 | The diagnosis read occurs only when no document matches | A successful write costs one round trip. | T29 |
 | Only `$set`, `$unset` and `$inc` are allowed | An allow-list fails closed. A key check alone lets `$rename` move a value into a system field. | T25 |
 | `tryUpdate` is separate from `update` | The retry loop uses the versioned write without the diagnosis read. `update` stays the one public path for user writes. | T29 |

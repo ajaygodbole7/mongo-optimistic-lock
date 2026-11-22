@@ -57,8 +57,8 @@ import org.slf4j.LoggerFactory;
  * Job 2, the who-columns ({@link WhoColumns}): an insert sets all four; an update sets the last-modified pair in the
  * same {@code updateOne} as the version.
  *
- * <p>The safety rules serve both jobs: the writer owns six field names ({@link #SYSTEM_FIELDS}), it accepts only the
- * operator allow-list, it pins majority writes and primary reads, and {@link MongoErrorTranslator} changes each driver
+ * <p>The safety rules serve both jobs: the writer owns its system fields ({@code _id}, the who-columns, and the version
+ * path with its parents), it accepts only the operator allow-list, it pins majority writes and primary reads, and {@link MongoErrorTranslator} changes each driver
  * exception into a {@link DataAccessException}.
  *
  * @param <K> the type of {@code _id}
@@ -67,22 +67,23 @@ public final class OptimisticLockingWriter<K> {
 
     private static final Logger log = LoggerFactory.getLogger(OptimisticLockingWriter.class);
 
-    /** The subdocument that holds the version. It contains nothing else. */
+    /** The subdocument that holds the version at the default path. It contains nothing else. */
     public static final String DOCUMENT_META = "_documentMeta";
     /** The version's name inside {@link #DOCUMENT_META}: a BSON {@code long}, 1 after the insert. */
     public static final String VERSION_FIELD = "version";
-    private static final String VERSION = DOCUMENT_META + "." + VERSION_FIELD;
+    private static final String DEFAULT_VERSION_PATH = DOCUMENT_META + "." + VERSION_FIELD;
 
     /** The update operators that a change can use. An allow-list fails closed. A block-list lets $rename through. */
     private static final Set<String> ALLOWED_OPERATORS = Set.of("$set", "$unset", "$inc");
 
-    /** The six fields that only this writer sets: {@code _id}, the version's root and the who-columns. */
-    public static final Set<String> SYSTEM_FIELDS = Stream.concat(Stream.of("_id", DOCUMENT_META),
-            WhoColumns.FIELDS.stream()).collect(Collectors.toUnmodifiableSet());
+    /** Root fields that only this writer sets, besides the version: {@code _id} and the who-columns. */
+    private static final Set<String> ROOT_FIELDS = Stream.concat(Stream.of("_id"), WhoColumns.FIELDS.stream())
+            .collect(Collectors.toUnmodifiableSet());
 
     private final MongoCollection<Document> collection;
     private final MongoCollection<Document> majorityReads; // reads that a failover cannot roll back
     private final InstantSource clock;
+    private final String versionPath;
 
     public OptimisticLockingWriter(MongoCollection<Document> collection) {
         this(collection, InstantSource.system());
@@ -96,6 +97,19 @@ public final class OptimisticLockingWriter<K> {
      * an array decodes as {@code java.util.Date}, because the driver's list decoding does not use this setting.
      */
     public OptimisticLockingWriter(MongoCollection<Document> collection, InstantSource clock) {
+        this(collection, clock, DEFAULT_VERSION_PATH);
+    }
+
+    /**
+     * Like {@link #OptimisticLockingWriter(MongoCollection, InstantSource)}, with the version at {@code versionPath}
+     * (a dotted path, for example {@code "version"}). Every writer of a collection must use the same path: two writers
+     * that check different paths do not see each other's writes.
+     *
+     * @throws IllegalArgumentException if {@code versionPath} is null or blank, has an empty segment, a segment that
+     *         starts with {@code $} or is only digits, or starts with {@code _id} or a who-column
+     */
+    public OptimisticLockingWriter(MongoCollection<Document> collection, InstantSource clock, String versionPath) {
+        this.versionPath = checkedVersionPath(versionPath);
         this.collection = collection
                 .withCodecRegistry(withInstantDates(collection.getCodecRegistry()))
                 .withWriteConcern(WriteConcern.MAJORITY)
@@ -118,14 +132,14 @@ public final class OptimisticLockingWriter<K> {
         }
         requireUser(user);
         for (String key : fields.keySet()) {
-            if (SYSTEM_FIELDS.contains(key.split("\\.", 2)[0])) {
+            if (isSystemField(key)) {
                 throw new IllegalArgumentException("System field not allowed in insert: " + key);
             }
         }
         Instant now = clock.instant(); // UTC; the driver drops the sub-millisecond part
         Document doc = new Document("_id", id);
         doc.putAll(fields);
-        doc.append(DOCUMENT_META, new Document(VERSION_FIELD, 1L));
+        doc.putAll(nested(versionPath, 1L));
         doc.putAll(WhoColumns.onInsert(now, user));
         call(id, Kind.INSERT, () -> collection.insertOne(doc));
     }
@@ -151,11 +165,11 @@ public final class OptimisticLockingWriter<K> {
     /** Does the versioned updateOne. Returns true if it matched. It does not do the diagnosis read. */
     private boolean tryUpdate(K id, long expectedVersion, Bson precondition, Bson changes, String user) {
         BsonDocument checked = checkedChanges(changes); // sent as checked: the caller's Bson is rendered once
-        Bson filter = and(filter(id, precondition), eq(VERSION, expectedVersion));
+        Bson filter = and(filter(id, precondition), eq(versionPath, expectedVersion));
         // The caller's changes come last: combine merges into the first operator document, so it changes ours.
         Bson update = Updates.combine(
                 WhoColumns.onUpdate(clock.instant(), user),
-                Updates.inc(VERSION, 1L),
+                Updates.inc(versionPath, 1L),
                 checked);
         return call(id, Kind.UPDATE, () -> collection.updateOne(filter, update)).getMatchedCount() == 1;
     }
@@ -278,7 +292,7 @@ public final class OptimisticLockingWriter<K> {
                 throw new IllegalArgumentException("Update operator value is not a document: " + operator.getKey());
             }
             for (String path : fields.keySet()) {
-                if (SYSTEM_FIELDS.contains(path.split("\\.", 2)[0])) {
+                if (isSystemField(path)) {
                     throw new IllegalArgumentException("System field not changeable: " + path);
                 }
             }
@@ -310,17 +324,53 @@ public final class OptimisticLockingWriter<K> {
     }
 
     /**
-     * Reads {@code _documentMeta.version}. If it is missing or not a whole number, it throws. It does not use a
-     * default value. An {@code int} or a whole {@code double} (from mongosh or a migration) is accepted.
+     * Reads the version at this writer's version path. If it is missing or not a whole number, it throws. It does not
+     * use a default value. An {@code int} or a whole {@code double} (from mongosh or a migration) is accepted.
      */
-    public static long readVersion(Document doc) {
-        if (doc.get(DOCUMENT_META) instanceof Document meta && meta.get(VERSION_FIELD) instanceof Number version) {
+    public long readVersion(Document doc) {
+        Object value = doc;
+        for (String segment : versionPath.split("\\.")) {
+            value = value instanceof Document d ? d.get(segment) : null;
+        }
+        if (value instanceof Number version) {
             if (version.doubleValue() != version.longValue()) {
                 throw new IllegalStateException("Document " + doc.get("_id") + " has a version that is not a whole "
                         + "number: " + version);
             }
             return version.longValue();
         }
-        throw new IllegalStateException("Document " + doc.get("_id") + " has no _documentMeta.version");
+        throw new IllegalStateException("Document " + doc.get("_id") + " has no " + versionPath);
+    }
+
+    /**
+     * A key or change path is a system field if it starts with {@code _id} or a who-column, or if it is the version
+     * path, one of its parents, or inside it: each of these would set the version.
+     */
+    private boolean isSystemField(String path) {
+        return ROOT_FIELDS.contains(path.split("\\.", 2)[0])
+                || path.equals(versionPath) || versionPath.startsWith(path + ".") || path.startsWith(versionPath + ".");
+    }
+
+    private static String checkedVersionPath(String path) {
+        if (path == null || path.isBlank()) {
+            throw new IllegalArgumentException("versionPath must not be null or blank");
+        }
+        String[] segments = path.split("\\.", -1);
+        for (String segment : segments) {
+            if (segment.isEmpty() || segment.startsWith("$") || segment.chars().allMatch(Character::isDigit)) {
+                throw new IllegalArgumentException("Invalid versionPath: " + path);
+            }
+        }
+        if (ROOT_FIELDS.contains(segments[0])) {
+            throw new IllegalArgumentException("versionPath must not start with a system field: " + path);
+        }
+        return path;
+    }
+
+    /** {@code {a: {b: value}}} for the path {@code a.b}. */
+    private static Document nested(String path, Object value) {
+        int dot = path.indexOf('.');
+        return dot < 0 ? new Document(path, value)
+                : new Document(path.substring(0, dot), nested(path.substring(dot + 1), value));
     }
 }

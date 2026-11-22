@@ -100,7 +100,7 @@ class WriterEdgeCasesIT {
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> writer.updateWithRetry("w", null, _ -> Updates.set("name", "b"), null, ONE_TRY))
                 .isInstanceOf(IllegalArgumentException.class);
-        assertThat(OptimisticLockingWriter.readVersion(stored())).isEqualTo(1L);
+        assertThat(writer.readVersion(stored())).isEqualTo(1L);
         assertThat(stored().getString("name")).isEqualTo("a");
     }
 
@@ -110,7 +110,7 @@ class WriterEdgeCasesIT {
             widgets.drop();
             insertRaw(whole);
             assertThat(writer.update("w", 1L, null, Updates.set("name", "b"), "bob")).as("%s", whole).isEqualTo(2L);
-            assertThat(OptimisticLockingWriter.readVersion(stored())).isEqualTo(2L);
+            assertThat(writer.readVersion(stored())).isEqualTo(2L);
         }
         for (Object bad : List.of(1.5, "1")) {
             widgets.drop();
@@ -153,7 +153,7 @@ class WriterEdgeCasesIT {
         } finally {
             Thread.interrupted();
         }
-        assertThat(OptimisticLockingWriter.readVersion(stored())).isEqualTo(2L);
+        assertThat(writer.readVersion(stored())).isEqualTo(2L);
         assertThat(stored().getString("name")).isEqualTo("a");
     }
 
@@ -311,5 +311,38 @@ class WriterEdgeCasesIT {
         assertThatThrownBy(() -> MongoErrorTranslator.call("w", MongoErrorTranslator.Kind.READ, () -> {
             throw unknown;
         })).isExactlyInstanceOf(NotWrittenException.class).hasCause(unknown);
+    }
+
+    /** G20: the caller chooses where the version is. The writer filters on, increments and protects that path. */
+    @Test
+    void g20_versionAtACallerChosenPath() {
+        OptimisticLockingWriter<String> atRoot = new OptimisticLockingWriter<>(widgets, InstantSource.fixed(NOW),
+                "version");
+        atRoot.insert("v", new Document("name", "a"), "alice");
+        Document inserted = widgets.find(eq("_id", "v")).first();
+        assertThat(inserted.get("version")).isEqualTo(1L);
+        assertThat(inserted).doesNotContainKey("_documentMeta");
+
+        assertThat(atRoot.update("v", 1L, null, Updates.set("name", "b"), "bob")).isEqualTo(2L);
+        assertThat(atRoot.readVersion(widgets.find(eq("_id", "v")).first())).isEqualTo(2L);
+        assertThatThrownBy(() -> atRoot.update("v", 1L, null, Updates.set("name", "c"), "bob"))
+                .isInstanceOf(VersionConflictException.class);
+        assertThatThrownBy(() -> atRoot.update("v", 2L, null, Updates.set("version", 9L), "bob"))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> atRoot.insert("w", new Document("version", 5L), "alice"))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThat(atRoot.update("v", 2L, null, Updates.set("_documentMeta.x", 1), "bob"))
+                .as("_documentMeta is an ordinary field here").isEqualTo(3L);
+
+        OptimisticLockingWriter<String> nested = new OptimisticLockingWriter<>(widgets, InstantSource.fixed(NOW),
+                "meta.rev");
+        nested.insert("n", new Document("name", "a"), "alice");
+        assertThatThrownBy(() -> nested.update("n", 1L, null, Updates.set("meta", new Document()), "bob"))
+                .as("a parent of the version").isInstanceOf(IllegalArgumentException.class);
+        assertThat(nested.update("n", 1L, null, Updates.set("meta.other", 1), "bob")).isEqualTo(2L);
+        Document updated = widgets.find(eq("_id", "n")).first();
+        assertThat(nested.readVersion(updated)).isEqualTo(2L);
+        assertThat(updated.getEmbedded(List.of("meta", "other"), Integer.class)).isEqualTo(1);
+        assertThat(widgets.countDocuments()).isEqualTo(2);
     }
 }

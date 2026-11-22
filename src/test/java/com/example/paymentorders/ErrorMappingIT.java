@@ -12,7 +12,6 @@ import static com.mongodb.client.model.Filters.eq;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowable;
 
-import com.example.optimistic.OptimisticLockingWriter;
 import com.example.optimistic.RetryPolicy;
 import com.example.optimistic.exception.DataAccessException;
 import com.example.optimistic.exception.NotAuthorisedMongoException;
@@ -114,7 +113,7 @@ class ErrorMappingIT {
     }
 
     private long version() {
-        return OptimisticLockingWriter.readVersion(collection(setupClient).find(eq("_id", id)).first());
+        return MongoTestSupport.version(collection(setupClient).find(eq("_id", id)).first());
     }
 
     private static Map<String, Object> remittance(String text) {
@@ -215,7 +214,7 @@ class ErrorMappingIT {
 
         assertThat(e).isInstanceOf(NotSentException.class);
         assertThat(holder.get(10, TimeUnit.SECONDS)).isEqualTo(2L);
-        assertThat(OptimisticLockingWriter.readVersion(collection(setupClient).find(eq("_id", other)).first()))
+        assertThat(MongoTestSupport.version(collection(setupClient).find(eq("_id", other)).first()))
                 .isEqualTo(1L);
     }
 
@@ -320,7 +319,7 @@ class ErrorMappingIT {
 
         // failCommand closes the connection before the update runs, so the reload shows it was not applied:
         // the version did not move and the remittance is still the original. The caller can retry safely.
-        assertThat(OptimisticLockingWriter.readVersion(reloaded)).isEqualTo(1L);
+        assertThat(MongoTestSupport.version(reloaded)).isEqualTo(1L);
         assertThat(reloaded.getEmbedded(List.of("remittance", "unstructured"), String.class)).isEqualTo("Invoice 4471");
     }
 
@@ -335,11 +334,11 @@ class ErrorMappingIT {
 
         // The server runs the update once its block ends; the driver's retry is deduplicated by the server.
         Document reloaded = majorityReload();
-        for (int i = 0; i < 50 && OptimisticLockingWriter.readVersion(reloaded) == 1L; i++) {
+        for (int i = 0; i < 50 && MongoTestSupport.version(reloaded) == 1L; i++) {
             reloaded = majorityReload();
             LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(100));
         }
-        assertThat(OptimisticLockingWriter.readVersion(reloaded)).as("applied exactly once").isEqualTo(2L);
+        assertThat(MongoTestSupport.version(reloaded)).as("applied exactly once").isEqualTo(2L);
         assertThat(reloaded.getEmbedded(List.of("remittance", "unstructured"), String.class)).isEqualTo("e7b");
     }
 
@@ -374,7 +373,7 @@ class ErrorMappingIT {
         // a timeoutMS expiry on a write is always "maybe written".
         assertThat(e).isInstanceOf(WriteTimeoutException.class);
         holder.get(10, TimeUnit.SECONDS);
-        assertThat(OptimisticLockingWriter.readVersion(collection(setupClient).find(eq("_id", other)).first()))
+        assertThat(MongoTestSupport.version(collection(setupClient).find(eq("_id", other)).first()))
                 .isEqualTo(1L);
     }
 

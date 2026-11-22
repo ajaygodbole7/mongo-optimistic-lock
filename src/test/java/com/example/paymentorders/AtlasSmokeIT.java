@@ -7,7 +7,6 @@ import static com.mongodb.client.model.Filters.eq;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.example.optimistic.OptimisticLockingWriter;
 import com.example.optimistic.exception.VersionConflictException;
 import com.example.paymentorders.exception.InvalidStatusException;
 import com.mongodb.MongoWriteException;
@@ -120,7 +119,7 @@ class AtlasSmokeIT {
             long winners = results.stream().filter(CompletableFuture::join).count();
             assertThat(winners).isEqualTo(1);
             Document doc = collection(client).find(eq("_id", id)).first();
-            assertThat(OptimisticLockingWriter.readVersion(doc)).isEqualTo(2L);
+            assertThat(MongoTestSupport.version(doc)).isEqualTo(2L);
         } finally {
             pods.forEach(MongoClient::close);
         }

@@ -10,6 +10,7 @@ import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.Updates;
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.List;
 import java.util.concurrent.Executor;
 import org.bson.Document;
 import org.bson.conversions.Bson;
@@ -123,6 +124,11 @@ public final class MongoTestSupport {
     /** The recompute function for system writes in tests: amount + 1, calculated from the current document. */
     static Bson incrementAmount(Document order) {
         return Updates.set("amount", new Decimal128(amountOf(order).add(BigDecimal.ONE)));
+    }
+
+    /** The version of a payment order, at the default path. The tests know where it is. */
+    static long version(Document order) {
+        return order.getEmbedded(List.of("_documentMeta", "version"), Number.class).longValue();
     }
 
     static BigDecimal amountOf(Document order) {

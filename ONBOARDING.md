@@ -91,7 +91,8 @@ Each order is one document:
   - Only the writer sets them.
   - Do not put them in order data or changes.
 - **The version:**
-  - `_documentMeta.version` is a `long`.
+  - `_documentMeta.version` is a `long`. (The generic writer can use a different path. `paymentOrders` uses this
+    one.)
   - It starts at 1.
   - Each successful update increases it by 1.
 - **Who-columns:**

@@ -7,7 +7,6 @@ import static com.mongodb.client.model.Filters.eq;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.example.optimistic.OptimisticLockingWriter;
 import com.example.optimistic.RetryPolicy;
 import com.example.optimistic.exception.RetriesExhaustedException;
 import com.example.optimistic.exception.VersionConflictException;
@@ -147,7 +146,7 @@ class ConcurrencyIT {
                         e -> assertThat(e.actualVersion()).isEqualTo(2L)));
 
         Document doc = load(id);
-        assertThat(OptimisticLockingWriter.readVersion(doc)).isEqualTo(2L);
+        assertThat(MongoTestSupport.version(doc)).isEqualTo(2L);
         assertThat(doc.getString("_lastModifiedBy"))
                 .isEqualTo(doc.getEmbedded(List.of("remittance", "unstructured"), String.class));
     }
@@ -171,7 +170,7 @@ class ConcurrencyIT {
 
         Document doc = load(id);
         assertThat(doc.getString("status")).isEqualTo(resultingStatus.get(winner));
-        assertThat(OptimisticLockingWriter.readVersion(doc)).isEqualTo(2L);
+        assertThat(MongoTestSupport.version(doc)).isEqualTo(2L);
     }
 
     @Test
@@ -196,7 +195,7 @@ class ConcurrencyIT {
         int winner = outcomes.getFirst() instanceof Outcome.Won<Long> ? 0 : 1;
 
         Document doc = load(id);
-        assertThat(OptimisticLockingWriter.readVersion(doc)).isEqualTo(2L);
+        assertThat(MongoTestSupport.version(doc)).isEqualTo(2L);
         Object address = doc.getEmbedded(List.of("creditor", "address"), Document.class);
         Object remittance = doc.get("remittance");
         if (winner == 0) {
@@ -243,7 +242,7 @@ class ConcurrencyIT {
         // Alice reloads, checks her field, and sends her change with the new version.
         Document current = alice.get(id).orElseThrow();
         assertThat(unchanged(base, current, List.of("creditor", "address"))).isTrue();
-        long merged = alice.updateCreditorAddress(id, OptimisticLockingWriter.readVersion(current), munich, "alice");
+        long merged = alice.updateCreditorAddress(id, MongoTestSupport.version(current), munich, "alice");
 
         assertThat(merged).isEqualTo(3L);
         Document doc = load(id);
@@ -288,7 +287,7 @@ class ConcurrencyIT {
         assertThat(recomputes).as("contention made the retry path run").isGreaterThan(successes);
 
         Document doc = load(id);
-        assertThat(OptimisticLockingWriter.readVersion(doc) - 1).isEqualTo(successes);
+        assertThat(MongoTestSupport.version(doc) - 1).isEqualTo(successes);
         assertThat(MongoTestSupport.amountOf(doc)).isEqualByComparingTo(
                 new BigDecimal("1250.00").add(BigDecimal.valueOf(successes)));
     }
@@ -317,7 +316,7 @@ class ConcurrencyIT {
                     ObjectId id = orders.get(idx);
                     while (true) {
                         Document current = service.get(id).orElseThrow(); // majority read, as callers must
-                        long version = OptimisticLockingWriter.readVersion(current);
+                        long version = MongoTestSupport.version(current);
                         BigDecimal next = MongoTestSupport.amountOf(current).add(BigDecimal.ONE);
                         try {
                             service.amend(id, version, Map.of("amount", next), "pod-" + pod);
@@ -344,7 +343,7 @@ class ConcurrencyIT {
 
         for (int i = 0; i < orders.size(); i++) {
             Document doc = load(orders.get(i));
-            assertThat(OptimisticLockingWriter.readVersion(doc) - 1).as("order %d version", i).isEqualTo(totals[i]);
+            assertThat(MongoTestSupport.version(doc) - 1).as("order %d version", i).isEqualTo(totals[i]);
             assertThat(MongoTestSupport.amountOf(doc)).as("order %d amount", i)
                     .isEqualByComparingTo(new BigDecimal("1250.00").add(BigDecimal.valueOf(totals[i])));
             assertThat(doc.get("_createdDate", Instant.class))

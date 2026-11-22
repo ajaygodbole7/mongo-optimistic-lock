@@ -7,7 +7,6 @@ import static com.mongodb.client.model.Filters.eq;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.example.optimistic.OptimisticLockingWriter;
 import com.example.optimistic.RetryPolicy;
 import com.example.paymentorders.exception.ShuttingDownException;
 import com.mongodb.client.MongoClient;
@@ -119,7 +118,7 @@ class ShutdownIT {
     }
 
     private long version() {
-        return OptimisticLockingWriter.readVersion(collection(setupClient).find(eq("_id", id)).first());
+        return MongoTestSupport.version(collection(setupClient).find(eq("_id", id)).first());
     }
 
     @Test
