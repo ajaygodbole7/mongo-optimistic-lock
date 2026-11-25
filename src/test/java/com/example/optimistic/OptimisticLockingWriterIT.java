@@ -82,6 +82,24 @@ class OptimisticLockingWriterIT {
         return writer.readVersion(doc);
     }
 
+    /**
+     * G22, a known limit: a delete and an insert with the same id restart the version at 1. A writer that read the
+     * old document at version 1 then passes the version check against the new one. The writer has no delete. The
+     * caller must not reuse the id of a deleted document.
+     */
+    @Test
+    void g22_staleWriteAfterDeleteAndReinsertWithTheSameIdIsNotDetected() {
+        writer.insert("w-22", new Document("name", "old"), "alice");
+        long staleVersion = version(load("w-22"));
+        widgets.deleteOne(eq("_id", "w-22"));
+        writer.insert("w-22", new Document("name", "new"), "bob");
+
+        long result = writer.update("w-22", staleVersion, null, Updates.set("name", "stale"), "carol");
+
+        assertThat(result).isEqualTo(2L);
+        assertThat(load("w-22").getString("name")).isEqualTo("stale");
+    }
+
     @Test
     void g1_insertWithCallerIdThenDuplicate() {
         writer.insert("w-1", new Document("name", "first").append("count", 0), "alice");

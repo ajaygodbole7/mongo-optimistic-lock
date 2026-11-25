@@ -22,6 +22,7 @@ import com.example.optimistic.exception.ResponseLostException;
 import com.example.optimistic.exception.RetriedWriteException;
 import com.example.optimistic.exception.ServerOverloadedException;
 import com.example.optimistic.exception.TransientDataAccessException;
+import com.example.optimistic.exception.VersionConflictException;
 import com.example.optimistic.exception.WriteNotConfirmedException;
 import com.example.optimistic.exception.WriteTimeoutException;
 import com.example.paymentorders.exception.OrderValidationException;
@@ -31,10 +32,13 @@ import com.mongodb.ReadConcern;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
 import com.mongodb.event.CommandListener;
+import com.mongodb.client.model.Updates;
 import com.mongodb.event.CommandStartedEvent;
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -42,6 +46,8 @@ import java.util.concurrent.locks.LockSupport;
 import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.bson.BsonMaximumSizeExceededException;
 import org.bson.Document;
+import org.bson.conversions.Bson;
+import org.bson.types.Decimal128;
 import org.bson.types.ObjectId;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -340,6 +346,77 @@ class ErrorMappingIT {
         }
         assertThat(MongoTestSupport.version(reloaded)).as("applied exactly once").isEqualTo(2L);
         assertThat(reloaded.getEmbedded(List.of("remittance", "unstructured"), String.class)).isEqualTo("e7b");
+    }
+
+    /**
+     * E7c: the write applied but the ack was lost. The caller sends the same write again with the old version. The
+     * writer cannot know that the document holds the caller's own write, so it reports a plain conflict. The version
+     * check stops a second apply. The equal value after the reload is a hint, not proof: another writer could have
+     * written the same value.
+     */
+    @Test
+    void e7c_resendAfterLostAckConflictsWithItsOwnWriteAndAppliesNothing() {
+        failUpdates(new Document("times", 2), new Document("blockConnection", true).append("blockTimeMS", 1000));
+        assertThat(transientFailure(() -> service("socketTimeoutMS=300").amend(id, 1L, remittance("e7c"), "bob")))
+                .isInstanceOf(ResponseLostException.class);
+        Document reloaded = majorityReload();
+        for (int i = 0; i < 50 && MongoTestSupport.version(reloaded) == 1L; i++) {
+            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(100));
+            reloaded = majorityReload();
+        }
+        assertThat(MongoTestSupport.version(reloaded)).as("the lost-ack write applied").isEqualTo(2L);
+
+        // The resend uses a client that the fail point does not touch, and a different user, so that a second apply
+        // would show in _lastModifiedBy.
+        PaymentOrderService resender = new PaymentOrderService(database(setupClient));
+        Throwable thrown = catchThrowable(() -> resender.amend(id, 1L, remittance("e7c"), "carol"));
+
+        assertThat(thrown).isInstanceOfSatisfying(VersionConflictException.class, conflict -> {
+            assertThat(conflict.expectedVersion()).isEqualTo(1L);
+            assertThat(conflict.actualVersion()).isEqualTo(2L);
+        });
+        Document after = majorityReload();
+        assertThat(MongoTestSupport.version(after)).as("no second apply").isEqualTo(2L);
+        assertThat(after.getString("_lastModifiedBy")).as("still the first writer").isEqualTo("bob");
+        assertThat(after.getEmbedded(List.of("remittance", "unstructured"), String.class))
+                .as("the reload holds the intended value: the caller's own write").isEqualTo("e7c");
+    }
+
+    /**
+     * E7d: the classic bug, in a naive caller that is not part of the library. The caller treats each failure as
+     * "try again": it reloads and sends the same relative change with the new version. After a lost ack, the first
+     * write had applied, so the change applies twice. The writer itself did nothing wrong: it reported "maybe
+     * written" and did not retry. This test shows why a caller must not retry a "maybe written" failure blindly.
+     */
+    @Test
+    void e7d_naiveRetryOfARelativeChangeAfterALostAckAppliesItTwice() {
+        failUpdates(new Document("times", 2), new Document("blockConnection", true).append("blockTimeMS", 1000));
+        MongoClient client = MongoTestSupport.newPod("appName=" + APP + "&socketTimeoutMS=300");
+        clients.add(client);
+        PaymentOptimisticWriter writer = new PaymentOptimisticWriter(collection(client));
+        Bson plusOne = Updates.inc("amount", new Decimal128(BigDecimal.ONE));
+        BigDecimal before = MongoTestSupport.amountOf(majorityReload());
+
+        long version = 1L;
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            try {
+                writer.update(id, version, Set.of(PaymentOrderStatus.DRAFT), plusOne, "bob");
+                break;
+            } catch (TransientDataAccessException lostAck) {
+                // The naive step: wait for the server to finish, reload, and send the same change again.
+                Document reloaded = majorityReload();
+                for (int i = 0; i < 50 && MongoTestSupport.version(reloaded) == 1L; i++) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(100));
+                    reloaded = majorityReload();
+                }
+                version = MongoTestSupport.version(reloaded);
+            }
+        }
+
+        BigDecimal after = MongoTestSupport.amountOf(majorityReload());
+        assertThat(after).as("one change was intended; the naive retry applied it twice")
+                .isEqualByComparingTo(before.add(BigDecimal.TWO));
+        assertThat(MongoTestSupport.version(majorityReload())).isEqualTo(3L);
     }
 
     /** E12: under timeoutMS, a pool checkout timeout is "maybe written", like each timeoutMS expiry on a write. */

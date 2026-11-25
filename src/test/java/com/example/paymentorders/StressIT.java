@@ -303,6 +303,12 @@ class StressIT {
             assertThat(doc.get("_createdDate", Instant.class))
                     .isEqualTo(created.get(i).get("_createdDate", Instant.class));
             assertThat(doc.getString("_createdBy")).isEqualTo(created.get(i).getString("_createdBy"));
+            // The last-modified pair: the creator, or a worker. Dates from different pods can differ a little, but
+            // the last write is never before the insert.
+            assertThat(doc.getString("_lastModifiedBy")).as("order %d _lastModifiedBy", i)
+                    .matches("alice|pod-\\d+-t\\d+");
+            assertThat(doc.get("_lastModifiedDate", Instant.class)).as("order %d _lastModifiedDate", i)
+                    .isAfterOrEqualTo(doc.get("_createdDate", Instant.class));
         }
     }
 }
