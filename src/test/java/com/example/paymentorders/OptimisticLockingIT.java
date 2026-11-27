@@ -34,6 +34,7 @@ import java.time.InstantSource;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
@@ -370,6 +371,7 @@ class OptimisticLockingIT {
         RetryPolicy longWaits = new RetryPolicy(50, Duration.ofSeconds(5), Duration.ofSeconds(5));
         AtomicInteger recomputes = new AtomicInteger();
         AtomicReference<Throwable> thrown = new AtomicReference<>();
+        AtomicBoolean interruptFlagKept = new AtomicBoolean();
 
         // Every recompute loses: another writer moves the version first, so the attempt conflicts and waits.
         Thread worker = new Thread(() -> {
@@ -381,6 +383,7 @@ class OptimisticLockingIT {
                 }, "system", longWaits);
             } catch (Throwable t) {
                 thrown.set(t);
+                interruptFlagKept.set(Thread.currentThread().isInterrupted()); // the writer must set it again
             }
         });
         worker.start();
@@ -396,6 +399,7 @@ class OptimisticLockingIT {
         assertThat(thrown.get()).as("%s", thrown.get()).isInstanceOfSatisfying(NotSentException.class, e -> {
             assertThat(e.getCause()).isInstanceOf(InterruptedException.class);
         });
+        assertThat(interruptFlagKept).as("the interrupt flag is set again for the caller").isTrue();
         assertThat(MongoTestSupport.amountOf(load(id))).as("the system write never applied")
                 .isEqualByComparingTo("1250.00");
     }
