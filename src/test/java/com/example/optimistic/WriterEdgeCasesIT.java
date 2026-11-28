@@ -234,7 +234,7 @@ class WriterEdgeCasesIT {
         assertThat(stored().getString(WhoColumns.CREATED_BY)).isNull(); // insertRaw sets no who-columns
 
         assertThatThrownBy(() -> new RetryPolicy(3, null, Duration.ZERO)).isInstanceOf(NullPointerException.class);
-        assertThatThrownBy(() -> new OptimisticLockingWriter<String>(null)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> new OptimisticLockingWriter<String>(null)).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test

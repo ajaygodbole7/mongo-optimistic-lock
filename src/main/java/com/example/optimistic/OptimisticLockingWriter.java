@@ -20,6 +20,7 @@ import com.mongodb.WriteConcern;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.Updates;
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.InstantSource;
@@ -106,10 +107,13 @@ public final class OptimisticLockingWriter<K> {
      * (a dotted path, for example {@code "version"}). Every writer of a collection must use the same path: two writers
      * that check different paths do not see each other's writes.
      *
-     * @throws IllegalArgumentException if {@code versionPath} is null or blank, has an empty segment, a segment that
-     *         starts with {@code $} or is only digits, or starts with {@code _id} or a who-column
+     * @throws IllegalArgumentException if {@code collection} or {@code clock} is null, or if {@code versionPath} is
+     *         null or blank, has an empty segment, a segment that starts with {@code $} or is only digits, or starts
+     *         with {@code _id} or a who-column
      */
     public OptimisticLockingWriter(MongoCollection<Document> collection, InstantSource clock, String versionPath) {
+        requireNonNull(collection, "collection");
+        requireNonNull(clock, "clock");
         this.versionPath = checkedVersionPath(versionPath);
         this.collection = collection
                 .withCodecRegistry(withInstantDates(collection.getCodecRegistry()))
@@ -123,16 +127,18 @@ public final class OptimisticLockingWriter<K> {
      * Inserts {@code fields} with the caller's {@code id}, version 1 and all four who-columns. The caller makes the
      * id before the insert. Thus, if the outcome is unknown, the caller can look up the document.
      *
-     * @throws IllegalArgumentException if {@code id} is null, {@code user} is null or blank, or {@code fields}
-     *         contains a system field (also as the first segment of a dotted key)
+     * @throws IllegalArgumentException if {@code id} or {@code fields} is null, {@code user} is null or blank, or
+     *         {@code fields} has a null key or contains a system field (also as the first segment of a dotted key)
      * @throws DuplicateKeyException if a document with the id exists (error 11000)
      */
     public void insert(K id, Document fields, String user) {
-        if (id == null) {
-            throw new IllegalArgumentException("id must not be null");
-        }
+        requireNonNull(id, "id");
         requireUser(user);
+        requireNonNull(fields, "fields");
         for (String key : fields.keySet()) {
+            if (key == null) {
+                throw new IllegalArgumentException("fields must not have a null key");
+            }
             if (isSystemField(key)) {
                 throw new IllegalArgumentException("System field not allowed in insert: " + key);
             }
@@ -152,10 +158,12 @@ public final class OptimisticLockingWriter<K> {
      *
      * @param precondition an extra filter (a status rule, a guard, a shard key), or null for none
      * @return the new version, {@code expectedVersion + 1}
-     * @throws IllegalArgumentException if {@code changes} touches a system field or uses another operator
+     * @throws IllegalArgumentException if {@code id} or {@code changes} is null, {@code user} is null or blank, or
+     *         {@code changes} touches a system field or uses another operator
      * @throws DocumentNotFoundException, VersionConflictException, PreconditionFailedException if no document matches
      */
     public long update(K id, long expectedVersion, Bson precondition, Bson changes, String user) {
+        requireNonNull(id, "id");
         requireUser(user);
         if (tryUpdate(id, expectedVersion, precondition, changes, user)) {
             return expectedVersion + 1;
@@ -185,6 +193,8 @@ public final class OptimisticLockingWriter<K> {
      * causes a retry after a full-jitter wait. All other failures stop the method.
      *
      * @return the new version, or the current version if {@code recompute} returned {@code null}
+     * @throws IllegalArgumentException if {@code id}, {@code recompute} or {@code policy} is null, or {@code user} is
+     *         null or blank. Nothing is read and {@code recompute} does not run.
      * @throws DocumentNotFoundException, PreconditionFailedException before {@code recompute}
      * @throws RetriesExhaustedException when all {@code policy.maxAttempts()} attempts conflict; requeue the work
      * @throws TransientDataAccessException on an infrastructure failure; {@link NotSentException} on an interrupt
@@ -192,6 +202,9 @@ public final class OptimisticLockingWriter<K> {
      */
     public long updateWithRetry(K id, Bson precondition, Function<Document, Bson> recompute, String user,
                                 RetryPolicy policy) {
+        requireNonNull(id, "id");
+        requireNonNull(recompute, "recompute"); // before the first read: recompute can have side effects
+        requireNonNull(policy, "policy");
         requireUser(user);
         for (int attempt = 1; ; attempt++) {
             // A local read: a majority read lags the primary and causes conflicts on hot documents.
@@ -260,6 +273,12 @@ public final class OptimisticLockingWriter<K> {
         return current == null ? new DocumentNotFoundException(id) : new PreconditionFailedException(id, current);
     }
 
+    private static void requireNonNull(Object value, String name) {
+        if (value == null) {
+            throw new IllegalArgumentException(name + " must not be null");
+        }
+    }
+
     /** The user becomes a who-column, so it must name someone. */
     private static void requireUser(String user) {
         if (user == null || user.isBlank()) {
@@ -306,8 +325,10 @@ public final class OptimisticLockingWriter<K> {
      * database can still roll back. Use it to reload after a conflict or an outcome-unknown error.
      *
      * @return the document, or null if it does not exist
+     * @throws IllegalArgumentException if {@code id} is null
      */
     public Document read(K id) {
+        requireNonNull(id, "id");
         return call(id, Kind.READ, () -> majorityReads.find(eq("_id", id)).first());
     }
 
@@ -340,6 +361,7 @@ public final class OptimisticLockingWriter<K> {
      * {@code Document} decoding settings do not apply to it.
      */
     public static CodecRegistry withInstantDates(CodecRegistry codecs) {
+        requireNonNull(codecs, "codecs");
         return CodecRegistries.fromRegistries(
                 CodecRegistries.fromProviders(new DocumentCodecProvider(
                         new BsonTypeClassMap(Map.of(BsonType.DATE_TIME, Instant.class)))),
@@ -348,19 +370,27 @@ public final class OptimisticLockingWriter<K> {
 
     /**
      * Reads the version at this writer's version path. If it is missing or not a whole number, it throws. It does not
-     * use a default value. An {@code int} or a whole {@code double} (from mongosh or a migration) is accepted.
+     * use a default value. An {@code int} or a whole {@code double} (from mongosh or a migration) is accepted, if it
+     * fits a {@code long} exactly.
+     *
+     * @throws IllegalArgumentException if {@code doc} is null
+     * @throws IllegalStateException if the version is missing, not a number, not whole, or outside the {@code long}
+     *         range
      */
     public long readVersion(Document doc) {
+        requireNonNull(doc, "doc");
         Object value = doc;
         for (String segment : versionPath.split("\\.")) {
             value = value instanceof Document d ? d.get(segment) : null;
         }
         if (value instanceof Number version) {
-            if (version.doubleValue() != version.longValue()) {
+            try {
+                // Exact: longValue() clips a number outside the long range, and a comparison as double hides the clip.
+                return new BigDecimal(version.toString()).longValueExact();
+            } catch (NumberFormatException | ArithmeticException e) { // NaN, infinity, a fraction, or too large
                 throw new IllegalStateException("Document " + doc.get("_id") + " has a version that is not a whole "
-                        + "number: " + version);
+                        + "number that fits a long: " + version, e);
             }
-            return version.longValue();
         }
         throw new IllegalStateException("Document " + doc.get("_id") + " has no " + versionPath);
     }
