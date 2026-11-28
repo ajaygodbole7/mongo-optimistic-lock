@@ -9,6 +9,7 @@ import com.example.optimistic.exception.DataAccessException;
 import com.example.optimistic.exception.DocumentNotFoundException;
 import com.example.optimistic.exception.DuplicateKeyException;
 import com.example.optimistic.exception.NotSentException;
+import com.example.optimistic.exception.NotWrittenException;
 import com.example.optimistic.exception.OptimisticWriteException;
 import com.example.optimistic.exception.PreconditionFailedException;
 import com.example.optimistic.exception.RetriesExhaustedException;
@@ -25,6 +26,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.InstantSource;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Function;
@@ -51,17 +53,22 @@ import org.slf4j.LoggerFactory;
  * <ul>
  *   <li><b>Write:</b> an insert starts at version 1. An update is one {@code updateOne} that filters on {@code _id}
  *       and the expected version, and does {@code $inc} of the version in the same atomic operation.</li>
- *   <li><b>Check:</b> if the update matches nothing, one read tells why: not found, a different version (a
- *       conflict), or a false precondition.</li>
+ *   <li><b>Check:</b> if the update matches nothing, a read tells why: not found, a different version (a
+ *       conflict), or a false precondition. If the version is the same and there is a precondition, a second read
+ *       checks it.</li>
  *   <li><b>Retry:</b> {@link #update} never retries. {@link #updateWithRetry}, for system jobs only, reads again,
  *       calculates the change again, and retries a conflict after a backoff with full jitter.</li>
  * </ul>
  * Job 2, the who-columns ({@link WhoColumns}): an insert sets all four; an update sets the last-modified pair in the
  * same {@code updateOne} as the version.
  *
- * <p>The safety rules serve both jobs: the writer owns its system fields ({@code _id}, the who-columns, and the version
- * path with its parents), it accepts only the operator allow-list, it pins majority writes and primary reads, and {@link MongoErrorTranslator} changes each driver
- * exception into a {@link DataAccessException}.
+ * <p>The safety rules serve both jobs:
+ * <ul>
+ *   <li>The writer owns its system fields: {@code _id}, the who-columns, and the version path with its parents.</li>
+ *   <li>It accepts only the operator allow-list.</li>
+ *   <li>It pins majority writes and primary reads. Its own reads use the local read concern.</li>
+ *   <li>{@link MongoErrorTranslator} changes each driver exception into a {@link DataAccessException}.</li>
+ * </ul>
  *
  * @param <K> the type of {@code _id}
  */
@@ -92,9 +99,10 @@ public final class OptimisticLockingWriter<K> {
     }
 
     /**
-     * {@code clock} supplies the who-column timestamps. Tests give a fixed one. Majority writes and primary reads
-     * are pinned. The client and the URI cannot change them. Thus, an acknowledged write stays after a failover,
-     * and the diagnosis read sees the primary's latest state. Each document that the writer reads has its dates as
+     * {@code clock} supplies the who-column timestamps. Tests give a fixed one. Majority writes, primary reads and
+     * the local read concern are pinned. The client and the URI cannot change them. Thus, an acknowledged write stays
+     * after a failover, and the diagnosis read sees the primary's latest state, also if the URI sets a majority read
+     * concern. {@link #read} is the one method that reads with {@code ReadConcern.MAJORITY}. Each document that the writer reads has its dates as
      * {@link Instant} ({@link #withInstantDates}), whatever client built the collection. One exception: a date inside
      * an array decodes as {@code java.util.Date}, because the driver's list decoding does not use this setting.
      */
@@ -107,20 +115,26 @@ public final class OptimisticLockingWriter<K> {
      * (a dotted path, for example {@code "version"}). Every writer of a collection must use the same path: two writers
      * that check different paths do not see each other's writes.
      *
-     * @throws IllegalArgumentException if {@code collection} or {@code clock} is null, or if {@code versionPath} is
-     *         null or blank, has an empty segment, a segment that starts with {@code $} or is only digits, or starts
-     *         with {@code _id} or a who-column
+     * @throws NullPointerException if {@code collection} is null
+     * @throws IllegalArgumentException if {@code clock} is null, if {@code collection} holds another class than
+     *         {@link Document}, or if {@code versionPath} is null or blank, has an empty segment, has a segment that
+     *         starts with {@code $} or is only digits, or starts with {@code _id} or a who-column
      */
     public OptimisticLockingWriter(MongoCollection<Document> collection, InstantSource clock, String versionPath) {
-        requireNonNull(collection, "collection");
-        requireNonNull(clock, "clock");
-        this.versionPath = checkedVersionPath(versionPath);
-        this.collection = collection
-                .withCodecRegistry(withInstantDates(collection.getCodecRegistry()))
+        MongoCollection<Document> source = Objects.requireNonNull(collection, "collection");
+        this.clock = requireNonNull(clock, "clock");
+        this.versionPath = checkedVersionPath(requireNonNull(versionPath, "versionPath"));
+        // The generic type is erased: a raw cast can pass a collection of another document class.
+        if (!Document.class.equals(source.getDocumentClass())) {
+            throw new IllegalArgumentException("collection must be a MongoCollection<Document>, not one of "
+                    + source.getDocumentClass());
+        }
+        this.collection = source
+                .withCodecRegistry(withInstantDates(source.getCodecRegistry()))
                 .withWriteConcern(WriteConcern.MAJORITY)
-                .withReadPreference(ReadPreference.primary());
+                .withReadPreference(ReadPreference.primary())
+                .withReadConcern(ReadConcern.LOCAL); // the URI can set majority: a lagging read gives false conflicts
         this.majorityReads = this.collection.withReadConcern(ReadConcern.MAJORITY);
-        this.clock = clock;
     }
 
     /**
@@ -143,7 +157,7 @@ public final class OptimisticLockingWriter<K> {
                 throw new IllegalArgumentException("System field not allowed in insert: " + key);
             }
         }
-        Instant now = clock.instant(); // UTC; the driver drops the sub-millisecond part
+        Instant now = now(); // UTC; the driver drops the sub-millisecond part
         Document doc = new Document("_id", id);
         doc.putAll(fields);
         doc.putAll(nested(versionPath, 1L));
@@ -160,7 +174,14 @@ public final class OptimisticLockingWriter<K> {
      * @return the new version, {@code expectedVersion + 1}
      * @throws IllegalArgumentException if {@code id} or {@code changes} is null, {@code user} is null or blank, or
      *         {@code changes} touches a system field or uses another operator
-     * @throws DocumentNotFoundException, VersionConflictException, PreconditionFailedException if no document matches
+     * @throws DocumentNotFoundException if no document has the {@code id}
+     * @throws VersionConflictException if the document is at another version
+     * @throws PreconditionFailedException if the document is at the expected version but does not match
+     *         {@code precondition}
+     * @throws IllegalStateException if the diagnosis read finds a stored version that is not usable
+     *         ({@link #readVersion})
+     * @throws TransientDataAccessException if the database call failed. The write may have happened, unless the
+     *         exception is a {@link NotWrittenException}.
      */
     public long update(K id, long expectedVersion, Bson precondition, Bson changes, String user) {
         requireNonNull(id, "id");
@@ -177,7 +198,7 @@ public final class OptimisticLockingWriter<K> {
         Bson filter = and(filter(id, precondition), eq(versionPath, expectedVersion));
         // The caller's changes come last: combine merges into the first operator document, so it changes ours.
         Bson update = Updates.combine(
-                WhoColumns.onUpdate(clock.instant(), user),
+                WhoColumns.onUpdate(now(), user),
                 Updates.inc(versionPath, 1L),
                 checked);
         return call(id, Kind.UPDATE, () -> collection.updateOne(filter, update)).getMatchedCount() == 1;
@@ -186,19 +207,25 @@ public final class OptimisticLockingWriter<K> {
     /**
      * System read-modify-write. Never use this for user writes.
      *
-     * <p>Each attempt reads the document from the primary (default read concern: a majority read lags and causes
-     * conflicts). If the document does not exist, or does not match {@code precondition}, the method throws before
-     * {@code recompute}. If not, {@code recompute} builds the change from the document. If {@code recompute} returns
+     * <p>Each attempt reads the document from the primary with the local read concern (a majority read lags and
+     * causes conflicts). If the document does not exist, or does not match {@code precondition}, the method throws
+     * before {@code recompute}. If not, {@code recompute} builds the change from the document. If {@code recompute} returns
      * {@code null}, there is nothing to change, and the method returns the version that it read. A version conflict
      * causes a retry after a full-jitter wait. All other failures stop the method.
      *
      * @return the new version, or the current version if {@code recompute} returned {@code null}
      * @throws IllegalArgumentException if {@code id}, {@code recompute} or {@code policy} is null, or {@code user} is
-     *         null or blank. Nothing is read and {@code recompute} does not run.
-     * @throws DocumentNotFoundException, PreconditionFailedException before {@code recompute}
+     *         null or blank. These checks run before the first read, so {@code recompute} does not run. It is also
+     *         thrown if the change from {@code recompute} touches a system field or uses another operator.
+     * @throws DocumentNotFoundException if the document does not exist. This comes before {@code recompute}, except
+     *         on the last attempt, where {@link #update} diagnoses a failed write.
+     * @throws PreconditionFailedException if the document does not match {@code precondition}. The same timing
+     *         applies.
      * @throws RetriesExhaustedException when all {@code policy.maxAttempts()} attempts conflict; requeue the work
-     * @throws TransientDataAccessException on an infrastructure failure; {@link NotSentException} on an interrupt
-     *         during the wait
+     * @throws IllegalStateException if a stored version is not usable ({@link #readVersion})
+     * @throws TransientDataAccessException on an infrastructure failure. {@link NotSentException} also means an
+     *         interrupt during the wait; the thread keeps its interrupt flag.
+     * @throws RuntimeException the exception of {@code recompute}, unchanged
      */
     public long updateWithRetry(K id, Bson precondition, Function<Document, Bson> recompute, String user,
                                 RetryPolicy policy) {
@@ -247,7 +274,10 @@ public final class OptimisticLockingWriter<K> {
         }
     }
 
-    /** The one read after a zero match. It finds out why the update did not match. */
+    /**
+     * The read after a zero match: it finds out why the update did not match. If the version is the same and there is
+     * a precondition, a second read checks the precondition.
+     */
     private OptimisticWriteException diagnose(K id, long expectedVersion, Bson precondition) {
         Document current = call(id, Kind.READ, () -> collection.find(eq("_id", id)).first());
         if (current == null) {
@@ -273,10 +303,21 @@ public final class OptimisticLockingWriter<K> {
         return current == null ? new DocumentNotFoundException(id) : new PreconditionFailedException(id, current);
     }
 
-    private static void requireNonNull(Object value, String name) {
+    /** The clock is the caller's: its answer is checked too. A null date would be stored as a null who-column. */
+    private Instant now() {
+        Instant now = clock.instant();
+        if (now == null) {
+            throw new IllegalStateException("The clock returned null");
+        }
+        return now;
+    }
+
+    /** Like {@link java.util.Objects#requireNonNull(Object, String)}, with {@link IllegalArgumentException}. */
+    private static <T> T requireNonNull(T value, String name) {
         if (value == null) {
             throw new IllegalArgumentException(name + " must not be null");
         }
+        return value;
     }
 
     /** The user becomes a who-column, so it must name someone. */
@@ -369,13 +410,12 @@ public final class OptimisticLockingWriter<K> {
     }
 
     /**
-     * Reads the version at this writer's version path. If it is missing or not a whole number, it throws. It does not
-     * use a default value. An {@code int} or a whole {@code double} (from mongosh or a migration) is accepted, if it
-     * fits a {@code long} exactly.
+     * Reads the version at this writer's version path. It accepts a {@code long}, an {@code int}, or a whole
+     * {@code double} (from mongosh or a migration) that fits a {@code long} exactly. It does not use a default value.
      *
      * @throws IllegalArgumentException if {@code doc} is null
-     * @throws IllegalStateException if the version is missing, not a number, not whole, or outside the {@code long}
-     *         range
+     * @throws IllegalStateException if the version is missing, is of another type (also {@code Decimal128}), or is a
+     *         {@code double} that is not whole or is outside the {@code long} range
      */
     public long readVersion(Document doc) {
         requireNonNull(doc, "doc");
@@ -383,16 +423,24 @@ public final class OptimisticLockingWriter<K> {
         for (String segment : versionPath.split("\\.")) {
             value = value instanceof Document d ? d.get(segment) : null;
         }
-        if (value instanceof Number version) {
-            try {
-                // Exact: longValue() clips a number outside the long range, and a comparison as double hides the clip.
-                return new BigDecimal(version.toString()).longValueExact();
-            } catch (NumberFormatException | ArithmeticException e) { // NaN, infinity, a fraction, or too large
-                throw new IllegalStateException("Document " + doc.get("_id") + " has a version that is not a whole "
-                        + "number that fits a long: " + version, e);
-            }
+        return switch (value) {
+            case Integer version -> version;
+            case Long version -> version;
+            case Double version -> wholeDouble(doc, version);
+            case null -> throw new IllegalStateException("Document " + doc.get("_id") + " has no " + versionPath);
+            default -> throw new IllegalStateException("Document " + doc.get("_id") + " has a version of type "
+                    + value.getClass().getSimpleName() + ", not int, long or double: " + value);
+        };
+    }
+
+    /** Exact: {@code longValue()} clips a number outside the long range, and a comparison as double hides the clip. */
+    private static long wholeDouble(Document doc, double version) {
+        try {
+            return new BigDecimal(version).longValueExact();
+        } catch (NumberFormatException | ArithmeticException e) { // NaN, infinity, a fraction, or too large
+            throw new IllegalStateException("Document " + doc.get("_id") + " has a version that is not a whole "
+                    + "number that fits a long: " + version, e);
         }
-        throw new IllegalStateException("Document " + doc.get("_id") + " has no " + versionPath);
     }
 
     /**

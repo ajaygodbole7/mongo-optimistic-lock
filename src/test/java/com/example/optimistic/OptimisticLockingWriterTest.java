@@ -76,8 +76,6 @@ class OptimisticLockingWriterTest {
         RetryPolicy policy = RetryPolicy.defaults();
 
         Map<String, ThrowingCallable> calls = new LinkedHashMap<>();
-        calls.put("new(collection=null)", () -> new OptimisticLockingWriter<String>(null));
-        calls.put("new(collection=null, clock)", () -> new OptimisticLockingWriter<String>(null, InstantSource.system()));
         calls.put("new(clock=null)", () -> new OptimisticLockingWriter<String>(collection, null));
         calls.put("new(versionPath=null)", () -> new OptimisticLockingWriter<String>(collection, InstantSource.system(), null));
         calls.put("insert(id=null)", () -> writer.insert(null, fields, "alice"));
@@ -97,21 +95,59 @@ class OptimisticLockingWriterTest {
 
         assertSoftly(soft -> calls.forEach((name, call) ->
                 soft.assertThatThrownBy(call).as(name).isInstanceOf(IllegalArgumentException.class)));
+        // SPEC G17: a null collection is a NullPointerException at construction.
+        assertThatThrownBy(() -> new OptimisticLockingWriter<String>(null)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> new OptimisticLockingWriter<String>(null, InstantSource.system()))
+                .isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> new OptimisticLockingWriter<String>(null, InstantSource.system(), "version"))
+                .isInstanceOf(NullPointerException.class);
         assertThat(recomputes).as("recompute never ran").hasValue(0);
     }
 
     /** G29: a stored version that is not a usable number is an IllegalStateException, never another exception. */
     @Test
-    void g29_aVersionThatIsNotAWholeNumberIsAnIllegalState() {
+    void g29_aStoredVersionThatIsNotALongIntOrWholeDoubleIsAnIllegalState() {
         OptimisticLockingWriter<String> writer = new OptimisticLockingWriter<>(collection);
         java.util.List<Object> bad = java.util.List.of(Decimal128.NaN, Decimal128.POSITIVE_INFINITY,
                 Decimal128.NEGATIVE_INFINITY, new Decimal128(new java.math.BigDecimal("1e30")),
-                new Decimal128(java.math.BigDecimal.valueOf(Long.MAX_VALUE).add(java.math.BigDecimal.ONE)), Double.NaN, Double.POSITIVE_INFINITY, 1.5, 1e30, 9.223372036854775807E18, "7", true);
+                new Decimal128(java.math.BigDecimal.valueOf(Long.MAX_VALUE).add(java.math.BigDecimal.ONE)), Double.NaN, Double.POSITIVE_INFINITY, 1.5, 1e30, 9.223372036854775807E18,
+                new Decimal128(java.math.BigDecimal.ONE), java.math.BigInteger.ONE, 1.0f, (short) 1, "7", true);
 
         for (Object version : bad) {
             Document doc = new Document("_id", "w").append("_documentMeta", new Document("version", version));
             assertThatThrownBy(() -> writer.readVersion(doc)).as("version %s", version)
                     .isInstanceOf(IllegalStateException.class);
+        }
+    }
+
+    /** G30: a non-null collection of another document class is rejected: the writer reads and writes Documents. */
+    @Test
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    void g30_aCollectionOfAnotherDocumentClassIsRejected() {
+        MongoCollection raw = collection.withDocumentClass(org.bson.BsonDocument.class);
+
+        assertThatThrownBy(() -> new OptimisticLockingWriter<String>(raw))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("BsonDocument");
+    }
+
+    /** G30: the clock is the caller's, so its answer is checked: a null date is never stored as a who-column. */
+    @Test
+    void g30_aClockThatReturnsNullFailsBeforeAnyDatabaseCall() {
+        OptimisticLockingWriter<String> writer = new OptimisticLockingWriter<>(collection, () -> null);
+
+        assertThatThrownBy(() -> writer.insert("w", new Document("name", "a"), "alice"))
+                .isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> writer.update("w", 1L, null, Updates.set("name", "b"), "bob"))
+                .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void g29_aLongAnIntAndAWholeDoubleAreAccepted() {
+        OptimisticLockingWriter<String> writer = new OptimisticLockingWriter<>(collection);
+
+        for (Object version : java.util.List.of(1L, 1, 1.0, 9_007_199_254_740_992.0)) {
+            Document doc = new Document("_id", "w").append("_documentMeta", new Document("version", version));
+            assertThat(writer.readVersion(doc)).as("version %s", version).isEqualTo(((Number) version).longValue());
         }
     }
 }

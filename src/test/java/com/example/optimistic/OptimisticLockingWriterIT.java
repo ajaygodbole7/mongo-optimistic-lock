@@ -111,6 +111,49 @@ class OptimisticLockingWriterIT {
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
+    /**
+     * G31: the URI can set a majority read concern. The writer's own reads (the retry read and the diagnosis read)
+     * must still use the local read concern: a lagging read gives a conflict with equal versions. {@code read} is the
+     * one method that reads with a majority read concern.
+     */
+    @Test
+    void g31_theWritersOwnReadsIgnoreTheReadConcernOfTheClient() {
+        List<BsonDocument> finds = new java.util.concurrent.CopyOnWriteArrayList<>();
+        CommandListener recordFinds = new CommandListener() {
+            @Override
+            public void commandStarted(com.mongodb.event.CommandStartedEvent event) {
+                if (event.getCommandName().equals("find")) {
+                    finds.add(event.getCommand().clone());
+                }
+            }
+        };
+        try (MongoClient majorityClient = MongoClients.create(MongoClientSettings.builder()
+                .applyConnectionString(new ConnectionString(
+                        MongoTestSupport.connectionString("readConcernLevel=majority")))
+                .addCommandListener(recordFinds).build())) {
+            var viaMajorityClient = new OptimisticLockingWriter<String>(widgets(majorityClient));
+            viaMajorityClient.insert("w-31", new Document("name", "a"), "alice");
+
+            viaMajorityClient.updateWithRetry("w-31", null, doc -> Updates.set("name", "b"), "job",
+                    RetryPolicy.defaults());
+            assertThatThrownBy(() -> viaMajorityClient.update("w-31", 1L, null, Updates.set("name", "c"), "bob"))
+                    .isInstanceOf(VersionConflictException.class);
+            assertThat(finds).as("the retry read and the diagnosis read").hasSize(2);
+            finds.forEach(find -> assertThat(readConcernLevel(find)).isEqualTo("local"));
+
+            finds.clear();
+            viaMajorityClient.read("w-31");
+            assertThat(finds).hasSize(1);
+            assertThat(readConcernLevel(finds.getFirst())).isEqualTo("majority");
+        }
+    }
+
+    /** The level that a find command asks for. No readConcern field means the server default, which is local. */
+    private static String readConcernLevel(BsonDocument find) {
+        return find.containsKey("readConcern") ? find.getDocument("readConcern").getString("level").getValue()
+                : "local";
+    }
+
     @Test
     void g1_insertWithCallerIdThenDuplicate() {
         writer.insert("w-1", new Document("name", "first").append("count", 0), "alice");
