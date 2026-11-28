@@ -18,6 +18,7 @@ import com.mongodb.ReadConcern;
 import com.mongodb.ReadPreference;
 import com.mongodb.WriteConcern;
 import com.mongodb.client.MongoCollection;
+import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.Updates;
 import java.time.Duration;
 import java.time.Instant;
@@ -308,6 +309,28 @@ public final class OptimisticLockingWriter<K> {
      */
     public Document read(K id) {
         return call(id, Kind.READ, () -> majorityReads.find(eq("_id", id)).first());
+    }
+
+    /**
+     * Startup check: throws if {@code db} is on a standalone server. The writer needs a replica set (or a sharded
+     * cluster): retryable writes and majority concerns do not work on a standalone server, and the writer then runs
+     * without any error. Call it once when the service starts. It sends one {@code hello} command, so a driver
+     * exception (for example a timeout) reaches the caller as it is.
+     *
+     * @throws IllegalArgumentException if {@code db} is null
+     * @throws IllegalStateException if the server is not a replica set member or a {@code mongos}
+     */
+    public static void requireReplicaSet(MongoDatabase db) {
+        if (db == null) {
+            throw new IllegalArgumentException("db must not be null");
+        }
+        Document hello = db.runCommand(new Document("hello", 1));
+        boolean replicaSet = hello.get("setName") != null;
+        boolean mongos = "isdbgrid".equals(hello.get("msg"));
+        if (!replicaSet && !mongos) {
+            throw new IllegalStateException("The server is a standalone mongod. OptimisticLockingWriter needs a "
+                    + "replica set or a sharded cluster: retryable writes and majority concerns do not work here.");
+        }
     }
 
     /**

@@ -101,6 +101,17 @@ class OptimisticLockingWriterIT {
     }
 
     @Test
+    void g26_aReplicaSetPassesTheStartupCheck() {
+        OptimisticLockingWriter.requireReplicaSet(MongoTestSupport.database(client));
+    }
+
+    @Test
+    void g26_aNullDatabaseIsRejected() {
+        assertThatThrownBy(() -> OptimisticLockingWriter.requireReplicaSet(null))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     void g1_insertWithCallerIdThenDuplicate() {
         writer.insert("w-1", new Document("name", "first").append("count", 0), "alice");
 
